@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 
 import networkx as nx
@@ -64,7 +64,7 @@ def ward_ids() -> list:
     return [w["id"] for w in load_index()["wards"]]
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_ward(ward_id: str) -> Ward:
     meta = next((w for w in load_index()["wards"] if w["id"] == ward_id), None)
     if meta is None:

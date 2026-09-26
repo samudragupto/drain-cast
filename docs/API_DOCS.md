@@ -21,7 +21,7 @@ These are shared by `/simulate` and `/route`.
   "wards": [{ "id": "chennai-velachery", "name": "Velachery", "city": "Chennai",
               "bbox": [12.973, 80.21, 12.988, 80.225], "center": [12.9805, 80.2175],
               "runoff_coeff": 0.85, "design_intensity": 35, "condition": 0.6,
-              "outfall_kind": "lake / marsh outfall", "road_count": 1083, "drain_count": 214, "notes": "..." }],
+              "outfall_kind": "lake / marsh outfall", "road_count": 1099, "drain_count": 214, "notes": "..." }],
   "patterns": { "steady": "Constant intensity for the whole window", "...": "..." },
   "sources": { "roads": "...", "elevation": "...", "drainage": "..." }
 }

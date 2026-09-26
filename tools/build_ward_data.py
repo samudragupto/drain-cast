@@ -243,11 +243,38 @@ def build_segments(ward, osm):
                     segments.append((way, piece))
                 start = i
 
-    # keep only the largest connected component so routing is coherent
+    out = []
+    for way, piece in segments:
+        tags = way.get("tags", {})
+        hw = tags.get("highway", "residential")
+        width, frontage = HIGHWAY_CLASSES.get(hw, (6.0, 15.0))
+        if "width" in tags:
+            try:
+                width = max(3.0, min(40.0, float(tags["width"].split()[0])))
+            except ValueError:
+                pass
+        coords = [nodes[nid] for nid in piece]
+        length = polyline_length(coords)
+        if length < 0.5:
+            continue
+        name = tags.get("name:en") or tags.get("name") or tags.get("ref")
+        out.append({
+            "way_id": way["id"],
+            "name": name,
+            "highway": hw,
+            "width": width,
+            "frontage": frontage,
+            "coords": coords,
+            "length": length,
+            "a": piece[0],
+            "b": piece[-1],
+        })
+
+    # keep only the largest connected component so every pair of points is routable
     adj = defaultdict(set)
-    for idx, (_, piece) in enumerate(segments):
-        adj[piece[0]].add(piece[-1])
-        adj[piece[-1]].add(piece[0])
+    for seg in out:
+        adj[seg["a"]].add(seg["b"])
+        adj[seg["b"]].add(seg["a"])
     seen, best = set(), set()
     for start in adj:
         if start in seen:
@@ -262,35 +289,7 @@ def build_segments(ward, osm):
         seen |= comp
         if len(comp) > len(best):
             best = comp
-    segments = [(way, piece) for way, piece in segments if piece[0] in best]
-
-    out = []
-    for way, piece in segments:
-        tags = way.get("tags", {})
-        hw = tags.get("highway", "residential")
-        width, frontage = HIGHWAY_CLASSES.get(hw, (6.0, 15.0))
-        if "width" in tags:
-            try:
-                width = max(3.0, min(40.0, float(tags["width"].split()[0])))
-            except ValueError:
-                pass
-        coords = [nodes[nid] for nid in piece]
-        length = polyline_length(coords)
-        if length < 5:
-            continue
-        name = tags.get("name:en") or tags.get("name") or tags.get("ref")
-        out.append({
-            "way_id": way["id"],
-            "name": name,
-            "highway": hw,
-            "width": width,
-            "frontage": frontage,
-            "coords": coords,
-            "length": length,
-            "a": piece[0],
-            "b": piece[-1],
-        })
-    return out, nodes
+    return [seg for seg in out if seg["a"] in best], nodes
 
 
 def smooth_junction_elevations(segments, junction_elev):
@@ -339,7 +338,7 @@ def build_drainage(ward, segments, junction_elev, rng):
 
     manholes = {}
     junction_to_mh = {}
-    for idx, (key, members) in enumerate(sorted(clusters.items())):
+    for idx, (_, members) in enumerate(sorted(clusters.items())):
         clat = sum(junction_pos[m][0] for m in members) / len(members)
         clon = sum(junction_pos[m][1] for m in members) / len(members)
         rep = min(members, key=lambda m: haversine_m(clat, clon, *junction_pos[m]))

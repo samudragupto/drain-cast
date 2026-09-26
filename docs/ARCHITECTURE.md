@@ -39,7 +39,7 @@ The API is stateless apart from these caches, so any number of gunicorn workers 
 
 ## Payload sizes
 
-For Velachery, with 1,083 segments and 214 manholes:
+For Velachery, with 1,099 segments and 214 manholes:
 - ward geometry is about 710 KB of raw JSON;
 - a simulation is about 860 KB raw.
 

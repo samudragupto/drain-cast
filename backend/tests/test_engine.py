@@ -68,7 +68,9 @@ class RoutingTests(unittest.TestCase):
         ward = load_ward(ward_ids()[0])
         depth = run(ward, peak=100.0)["frames"][-1]["depth"]
         s, w, n, e = ward.meta["bbox"]
-        routes = plan_routes(ward, depth, (s + 0.2 * (n - s), w + 0.2 * (e - w)), (s + 0.8 * (n - s), w + 0.8 * (e - w)))
+        start = (s + 0.2 * (n - s), w + 0.2 * (e - w))
+        end = (s + 0.8 * (n - s), w + 0.8 * (e - w))
+        routes = plan_routes(ward, depth, start, end)
         by_id = {seg["id"]: i for i, seg in enumerate(ward.segments)}
         if routes["safe"]:
             for rid in routes["safe"]["segment_ids"]:
