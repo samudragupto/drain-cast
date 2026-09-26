@@ -5,7 +5,6 @@ import math
 from coupling_engine import calculate_flood_risk
 from graph_builder import build_drainage_graph, get_road_drainage_capacity
 from routing import calculate_safe_route
-from terrain_processor import apply_terrain_factor
 from datetime import datetime
 import logging
 
