@@ -1,0 +1,49 @@
+name: Live deployment check
+
+# Vercel (dashboard) and Render (API) deploy themselves from main through their
+# Git integrations. This workflow waits for them after a green CI run and checks
+# that the public URLs actually serve a working DrainCast.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  API_URL: ${{ vars.API_URL || 'https://drain-cast.onrender.com' }}
+  APP_URL: ${{ vars.APP_URL || 'https://drain-cast.vercel.app' }}
+
+jobs:
+  smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Give Render and Vercel time to roll out
+        if: github.event_name == 'workflow_run'
+        run: sleep 240
+
+      - name: API is up (free Render instances cold-start in ~30-60 s)
+        run: curl -fsS --retry 20 --retry-delay 15 --retry-all-errors --max-time 90 "$API_URL/api/health"
+
+      - name: API serves all wards
+        run: |
+          curl -fsS --retry 3 --retry-all-errors --max-time 90 "$API_URL/api/wards" \
+            | python3 -c "import json,sys; w=json.load(sys.stdin)['wards']; assert len(w)>=5; print([x['id'] for x in w])"
+
+      - name: API runs the model
+        run: |
+          curl -fsS --retry 3 --retry-all-errors --max-time 120 -X POST -H 'Content-Type: application/json' \
+            -d '{"ward":"mumbai-kurla-east","pattern":"steady","intensity":50}' "$API_URL/api/simulate" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['frames'])==37; print('ok', d['stats'][-1])"
+
+      - name: Dashboard is served
+        run: |
+          page="$(curl -fsS --retry 5 --retry-all-errors --max-time 60 "$APP_URL")"
+          grep -q "DrainCast" <<< "$page"
+          echo "Dashboard OK: $APP_URL"

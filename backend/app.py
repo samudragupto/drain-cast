@@ -76,7 +76,7 @@ def _scenario(body: dict) -> dict:
     try:
         intensity = float(body.get("intensity", 50))
     except (TypeError, ValueError):
-        raise BadRequest("intensity must be a number (mm/h)")
+        raise BadRequest("intensity must be a number (mm/h)") from None
     return {
         "ward": body.get("ward") or ward_ids()[0],
         "mode": mode,
@@ -95,7 +95,7 @@ def _rain_series(params: dict):
         except Exception as err:
             logger.warning("Live rainfall unavailable: %s", err)
             raise BadRequest("Live forecast is unavailable right now (no connection to Open-Meteo). "
-                             "Use a scenario instead.")
+                             "Use a scenario instead.") from err
         return tuple(live["series"]), {k: v for k, v in live.items() if k != "series"}
     series = nowcast.design_hyetograph(params["pattern"], params["intensity"])
     return tuple(series), {"source": "Design storm", "description": nowcast.PATTERNS[params["pattern"]]}
@@ -184,7 +184,7 @@ def predict():
     try:
         hours = max(0, min(3, int(body.get("timeline", 0))))
     except (TypeError, ValueError):
-        raise BadRequest("timeline must be 0, 1, 2 or 3")
+        raise BadRequest("timeline must be 0, 1, 2 or 3") from None
     result, _, _ = _simulate(params)
     ward = load_ward(params["ward"])
     frame = result["frames"][hours * 60 // nowcast.STEP_MIN]
@@ -218,14 +218,14 @@ def route():
         start = (float(body["start"][0]), float(body["start"][1]))
         end = (float(body["end"][0]), float(body["end"][1]))
     except (KeyError, TypeError, ValueError, IndexError):
-        raise BadRequest("start and end must be [lat, lon]")
+        raise BadRequest("start and end must be [lat, lon]") from None
     result, _, _ = _simulate(params)
     frame_idx = max(0, min(len(result["frames"]) - 1, int(body.get("frame", 0))))
     depth = result["frames"][frame_idx]["depth"]
     try:
         routes = plan_routes(load_ward(params["ward"]), depth, start, end)
     except ValueError as err:
-        raise BadRequest(str(err))
+        raise BadRequest(str(err)) from err
     return jsonify({"frame": frame_idx, "t": result["frames"][frame_idx]["t"], **routes})
 
 
@@ -250,7 +250,7 @@ def rainfall_live():
         live = nowcast.fetch_live_rainfall(lat, lon)
     except Exception as err:
         logger.warning("Live rainfall unavailable: %s", err)
-        raise BadRequest("Live forecast is unavailable right now")
+        raise BadRequest("Live forecast is unavailable right now") from err
     return jsonify({"times": nowcast.step_times(), **live})
 
 

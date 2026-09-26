@@ -105,7 +105,7 @@ def plan_routes(ward: Ward, depth: list, start: tuple, end: tuple) -> dict:
     try:
         normal_path = nx.shortest_path(graph, src, dst, weight=plain)
     except nx.NetworkXNoPath:
-        raise ValueError("These points are not connected by the road network")
+        raise ValueError("These points are not connected by the road network") from None
 
     try:
         safe_path = nx.shortest_path(graph, src, dst, weight=aware)

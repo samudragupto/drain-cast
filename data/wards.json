@@ -24,7 +24,7 @@
       "condition": 0.7,
       "outfall_kind": "tidal creek outfall",
       "notes": "L-Ward. Legacy BMC storm drains were designed for 25 mm/h at low tide; outfalls are tide-locked at high tide.",
-      "road_count": 862,
+      "road_count": 901,
       "drain_count": 167
     },
     {
@@ -46,7 +46,7 @@
       "condition": 0.65,
       "outfall_kind": "canal outfall",
       "notes": "Dense commercial core; drains discharge towards the Mambalam canal.",
-      "road_count": 606,
+      "road_count": 624,
       "drain_count": 152
     },
     {
@@ -68,7 +68,7 @@
       "condition": 0.6,
       "outfall_kind": "lake / marsh outfall",
       "notes": "Built over the Velachery lake catchment next to Pallikaranai marsh; one of the worst-hit areas in 2015 and 2023.",
-      "road_count": 1083,
+      "road_count": 1099,
       "drain_count": 214
     },
     {
@@ -90,7 +90,7 @@
       "condition": 0.65,
       "outfall_kind": "Adyar river outfall",
       "notes": "On the Adyar river; outfalls back up when the river is in spate.",
-      "road_count": 875,
+      "road_count": 892,
       "drain_count": 185
     },
     {
@@ -112,7 +112,7 @@
       "condition": 0.6,
       "outfall_kind": "lake / channel outfall",
       "notes": "Tambaram Corporation. Low-lying layouts near the Adyar headwaters.",
-      "road_count": 629,
+      "road_count": 636,
       "drain_count": 145
     }
   ]
