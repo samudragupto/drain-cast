@@ -1,250 +1,122 @@
-"""
-Routing: Calculate flood-safe paths through road network
-"""
+"""Flood-aware routing on the ward's OSM street graph."""
 
-import math
-from typing import List, Tuple, Dict
-import logging
+import networkx as nx
 
-logger = logging.getLogger(__name__)
+from graph_builder import Ward, haversine_m
 
-def calculate_safe_route(start: Tuple, end: Tuple, flooded_roads: List[str], roads_data: Dict):
-    """
-    Find safest route avoiding flooded roads
+MAX_SNAP_M = 500.0
+IMPASSABLE_CM = 30.0
 
-    Args:
-        start: (lat, lon) of origin
-        end: (lat, lon) of destination
-        flooded_roads: List of road IDs to avoid
-        roads_data: GeoJSON FeatureCollection of all roads
+# travel speeds (km/h) for an emergency / municipal vehicle in city traffic
+SPEED_DRY = 22.0
+SPEED_WET = 14.0        # 5-15 cm
+SPEED_FLOODED = 6.0     # 15-30 cm, crawl through
 
-    Returns:
-        Dict with normal_route and safe_route
-    """
 
-    # Build simple road network graph
-    network = build_road_network(roads_data)
+def flood_penalty(depth_cm: float):
+    if depth_cm >= IMPASSABLE_CM:
+        return None
+    if depth_cm >= 15:
+        return 10.0
+    if depth_cm >= 5:
+        return 2.0
+    return 1.0
 
-    # Find normal route (shortest distance ignoring floods)
-    normal_route = find_shortest_path(start, end, network, [], roads_data)
 
-    # Find safe route (avoiding flooded roads)
-    safe_route = find_shortest_path(start, end, network, flooded_roads, roads_data)
+def speed_for(depth_cm: float) -> float:
+    if depth_cm >= 15:
+        return SPEED_FLOODED
+    if depth_cm >= 5:
+        return SPEED_WET
+    return SPEED_DRY
 
-    # Calculate metrics
-    normal_distance = calculate_route_distance(normal_route)
-    safe_distance = calculate_route_distance(safe_route)
 
-    flooded_segments = count_flooded_segments(normal_route, flooded_roads)
+def nearest_junction(ward: Ward, lat: float, lon: float):
+    best, best_d = None, float("inf")
+    for node, attrs in ward.road_graph.nodes(data=True):
+        d = haversine_m(lat, lon, attrs["lat"], attrs["lon"])
+        if d < best_d:
+            best, best_d = node, d
+    if best_d > MAX_SNAP_M:
+        return None, best_d
+    return best, best_d
 
+
+def _pick_edge(edges: dict, depth: list, flood_aware: bool):
+    """Choose the cheapest parallel edge between two junctions."""
+    best, best_w = None, float("inf")
+    for attrs in edges.values():
+        pen = flood_penalty(depth[attrs["idx"]]) if flood_aware else 1.0
+        if pen is None:
+            continue
+        w = attrs["length"] * pen
+        if w < best_w:
+            best, best_w = attrs, w
+    return best, best_w
+
+
+def _describe(ward: Ward, path: list, depth: list, flood_aware: bool) -> dict:
+    coords, used = [], []
+    length_m, minutes = 0.0, 0.0
+    for u, v in zip(path, path[1:]):
+        attrs, _ = _pick_edge(ward.road_graph.get_edge_data(u, v), depth, flood_aware)
+        seg = ward.segments[attrs["idx"]]
+        line = [[c[1], c[0]] for c in seg["coords"]]
+        if seg["from_node"] != u:
+            line.reverse()
+        coords.extend(line if not coords else line[1:])
+        d = depth[attrs["idx"]]
+        length_m += seg["length_m"]
+        minutes += seg["length_m"] / 1000.0 / speed_for(d) * 60.0
+        used.append({"id": seg["id"], "name": seg["name"], "depth": d})
+    flooded = [u for u in used if u["depth"] >= 15]
+    named = {}
+    for u in flooded:
+        key = u["name"] or "Unnamed road"
+        named[key] = max(named.get(key, 0.0), u["depth"])
     return {
-        'normal': normal_route,
-        'safe': safe_route,
-        'distance_difference': safe_distance - normal_distance,
-        'time_difference': (safe_distance - normal_distance) / 40 * 60,  # 40 km/h average
-        'flooded_avoided': flooded_segments
+        "coordinates": coords,
+        "length_km": round(length_m / 1000.0, 2),
+        "minutes": round(minutes, 1),
+        "max_depth": max((u["depth"] for u in used), default=0.0),
+        "flooded_segments": len(flooded),
+        "flooded_roads": [{"name": k, "depth": v} for k, v in sorted(named.items(), key=lambda kv: -kv[1])],
+        "segment_ids": [u["id"] for u in used],
     }
 
-def build_road_network(roads_data):
-    """
-    Convert GeoJSON roads to network graph
-    Returns adjacency info for pathfinding
-    """
-    network = {}
-    features = roads_data.get('features', [])
 
-    for feature in features:
-        road_id = feature['properties']['id']
-        coords = feature['geometry']['coordinates']
+def plan_routes(ward: Ward, depth: list, start: tuple, end: tuple) -> dict:
+    """Shortest route vs. flood-aware route between two map points at one moment in time."""
+    src, src_d = nearest_junction(ward, *start)
+    dst, dst_d = nearest_junction(ward, *end)
+    if src is None or dst is None:
+        raise ValueError("Pick points on or near a road inside the ward")
+    if src == dst:
+        raise ValueError("Start and destination snap to the same junction")
 
-        network[road_id] = {
-            'coordinates': coords,
-            'start': tuple(coords[0]),
-            'end': tuple(coords[-1]),
-            'distance': calculate_line_distance(coords),
-            'name': feature['properties'].get('name', 'Unknown Road')
-        }
+    def plain(u, v, edges):
+        return _pick_edge(edges, depth, False)[1]
 
-    return network
+    def aware(u, v, edges):
+        w = _pick_edge(edges, depth, True)[1]
+        return None if w == float("inf") else w
 
-def find_shortest_path(start: Tuple, end: Tuple, network: Dict,
-                      avoid_roads: List[str], roads_data: Dict):
-    """
-    Dijkstra's algorithm for shortest path
-    Weights by distance, heavy penalty for flooded roads
-    """
+    graph = ward.road_graph
+    try:
+        normal_path = nx.shortest_path(graph, src, dst, weight=plain)
+    except nx.NetworkXNoPath:
+        raise ValueError("These points are not connected by the road network")
 
-    # Find closest road to start and end points
-    start_road = find_nearest_road(start, network)
-    end_road = find_nearest_road(end, network)
+    try:
+        safe_path = nx.shortest_path(graph, src, dst, weight=aware)
+        safe = _describe(ward, safe_path, depth, True)
+    except nx.NetworkXNoPath:
+        safe = None
 
-    if not start_road or not end_road:
-        # Fallback: direct line
-        return [{'type': 'LineString', 'coordinates': [start, end]}]
-
-    # BFS with Dijkstra weights
-    visited = set()
-    distances = {start_road: 0}
-    previous = {start_road: None}
-    priority_queue = [(0, start_road)]
-
-    while priority_queue:
-        current_distance, current_road = min(priority_queue, key=lambda x: x[0])
-        priority_queue.remove((current_distance, current_road))
-
-        if current_road in visited:
-            continue
-
-        visited.add(current_road)
-
-        if current_road == end_road:
-            break
-
-        # Find adjacent roads (share endpoints or are close)
-        for next_road in find_adjacent_roads(current_road, network):
-            if next_road in visited:
-                continue
-
-            # Calculate edge weight
-            road_distance = network[next_road]['distance']
-
-            # Apply heavy penalty if flooded
-            if next_road in avoid_roads:
-                weight = road_distance * 10  # 10x penalty for flooded roads
-            else:
-                weight = road_distance
-
-            new_distance = current_distance + weight
-
-            if next_road not in distances or new_distance < distances[next_road]:
-                distances[next_road] = new_distance
-                previous[next_road] = current_road
-                priority_queue.append((new_distance, next_road))
-
-    # Reconstruct path
-    path = []
-    current = end_road
-
-    while current:
-        road = network.get(current)
-        if road:
-            path.insert(0, road['coordinates'])
-        current = previous.get(current)
-
-    return path
-
-def find_nearest_road(point: Tuple, network: Dict):
-    """
-    Find closest road to a point
-    Returns road ID
-    """
-    min_distance = float('inf')
-    nearest_road = None
-
-    for road_id, road_data in network.items():
-        # Check distance to both endpoints
-        for endpoint in [road_data['start'], road_data['end']]:
-            distance = haversine_distance(point, endpoint)
-            if distance < min_distance:
-                min_distance = distance
-                nearest_road = road_id
-
-    return nearest_road if min_distance < 0.02 else None  # Within ~2km
-
-def find_adjacent_roads(road_id: str, network: Dict):
-    """
-    Find roads that connect to this one
-    """
-    road = network.get(road_id)
-    if not road:
-        return []
-
-    adjacent = []
-    road_end = road['end']
-
-    for other_id, other_data in network.items():
-        if other_id == road_id:
-            continue
-
-        # Check if this road starts where other ends
-        if other_data['start'] == road_end or other_data['end'] == road_end:
-            adjacent.append(other_id)
-
-    return adjacent
-
-def haversine_distance(point1: Tuple, point2: Tuple) -> float:
-    """
-    Distance between two lat/lon points in km
-    """
-    lat1, lon1 = point1
-    lat2, lon2 = point2
-
-    R = 6371
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-
-    a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-    return R * c
-
-def calculate_line_distance(coordinates: List[Tuple]) -> float:
-    """
-    Calculate total distance of polyline
-    """
-    distance = 0
-    for i in range(len(coordinates) - 1):
-        distance += haversine_distance(
-            (coordinates[i][1], coordinates[i][0]),  # Swap to lat/lon
-            (coordinates[i+1][1], coordinates[i+1][0])
-        )
-    return distance
-
-def calculate_route_distance(route: List) -> float:
-    """
-    Calculate total distance of entire route
-    """
-    total = 0
-    for segment in route:
-        if isinstance(segment, list):
-            total += calculate_line_distance(segment)
-        elif isinstance(segment, dict) and 'coordinates' in segment:
-            total += calculate_line_distance(segment['coordinates'])
-    return total
-
-def count_flooded_segments(route: List, flooded_roads: List[str]) -> int:
-    """
-    Count how many flooded road segments are in route
-    """
-    # Simple counting - in production would link route back to road IDs
-    return 0
-
-def get_travel_time(distance_km: float, conditions: str = "normal") -> float:
-    """
-    Estimate travel time in minutes
-    Accounts for traffic conditions
-    """
-    speeds = {
-        'normal': 40,      # km/h
-        'congested': 20,
-        'light': 50,
-        'flooded': 10      # Very slow in flood zones
-    }
-
-    speed = speeds.get(conditions, 40)
-    time_hours = distance_km / speed
-    return time_hours * 60
-
-def format_route_for_display(route_coordinates: List[List]) -> Dict:
-    """
-    Format route for frontend display
-    """
+    normal = _describe(ward, normal_path, depth, False)
     return {
-        'type': 'LineString',
-        'coordinates': route_coordinates,
-        'properties': {
-            'distance': calculate_line_distance(route_coordinates),
-            'travel_time': get_travel_time(calculate_line_distance(route_coordinates))
-        }
+        "normal": normal,
+        "safe": safe,
+        "same_route": safe is not None and safe["segment_ids"] == normal["segment_ids"],
+        "snap_m": [round(src_d), round(dst_d)],
     }

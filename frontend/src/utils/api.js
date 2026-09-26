@@ -1,60 +1,34 @@
-import axios from 'axios';
+const BASE = (process.env.REACT_APP_API_URL || '/api').replace(/\/$/, '');
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
-
-const apiClient = axios.create({
-  baseURL: API_BASE,
-  timeout: 10000,
-  headers: {
-    'Content-Type': 'application/json'
-  }
-});
-
-export const fetchPredictions = async (rainfallIntensity, timeline) => {
+async function request(path, { method = 'GET', body, signal } = {}) {
+  let res;
   try {
-    const response = await apiClient.post('/predict', {
-      rainfall_intensity: rainfallIntensity,
-      timeline: timeline
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      signal,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
     });
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching predictions:', error);
-    throw error;
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    throw new Error('Cannot reach the DrainCast API. Is the backend running on port 5000?');
   }
-};
-
-export const fetchRoute = async (start, end, floodData) => {
+  let data = null;
   try {
-    const response = await apiClient.post('/route', {
-      start,
-      end,
-      current_flood_data: floodData
-    });
-    return response.data;
-  } catch (error) {
-    console.error('Error calculating route:', error);
-    throw error;
+    data = await res.json();
+  } catch {
+    // non-JSON error page (e.g. proxy failure)
   }
-};
-
-export const fetchWardInfo = async () => {
-  try {
-    const response = await apiClient.get('/ward-info');
-    return response.data;
-  } catch (error) {
-    console.error('Error fetching ward info:', error);
-    throw error;
+  if (!res.ok) {
+    throw new Error((data && data.error) || `Request failed (${res.status})`);
   }
-};
+  return data;
+}
 
-export const checkHealth = async () => {
-  try {
-    const response = await apiClient.get('/health');
-    return response.data;
-  } catch (error) {
-    console.error('Error checking health:', error);
-    throw error;
-  }
+export const api = {
+  health: () => request('/health'),
+  wards: () => request('/wards'),
+  ward: (id, signal) => request(`/wards/${encodeURIComponent(id)}`, { signal }),
+  simulate: (params, signal) => request('/simulate', { method: 'POST', body: params, signal }),
+  route: (payload, signal) => request('/route', { method: 'POST', body: payload, signal }),
 };
-
-export default apiClient;

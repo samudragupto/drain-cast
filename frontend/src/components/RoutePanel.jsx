@@ -1,133 +1,80 @@
-import React, { useState } from 'react';
+import { cm, offsetLabel } from '../utils/format';
 
-const RoutePanel = ({ predictions, rainfallIntensity }) => {
-  const [startPoint, setStartPoint] = useState('');
-  const [endPoint, setEndPoint] = useState('');
-  const [routeResult, setRouteResult] = useState(null);
-
-  const handleFindRoute = async () => {
-    if (!startPoint || !endPoint) {
-      alert('Please enter both start and end points');
-      return;
-    }
-
-    // Simulate route calculation
-    // In production, would call backend API
-    const floodedRoads = predictions?.roads.filter(
-      (r) => r.flood_risk === 'high' || r.flood_risk === 'critical'
-    ) || [];
-
-    setRouteResult({
-      startPoint,
-      endPoint,
-      floodedSegmentsAvoided: floodedRoads.length,
-      distanceDifference: Math.random() * 2,
-      timeDifference: Math.random() * 8
-    });
-  };
-
-  const handleReset = () => {
-    setStartPoint('');
-    setEndPoint('');
-    setRouteResult(null);
-  };
-
+function RouteStats({ label, route, tone }) {
   return (
-    <div className="route-panel">
-      <h3>🚗 Flood-Safe Routing</h3>
-
-      <div className="input-group">
-        <label>Start Location</label>
-        <input
-          type="text"
-          placeholder="Enter starting point"
-          value={startPoint}
-          onChange={(e) => setStartPoint(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && handleFindRoute()}
-        />
-      </div>
-
-      <div className="input-group">
-        <label>End Location</label>
-        <input
-          type="text"
-          placeholder="Enter destination"
-          value={endPoint}
-          onChange={(e) => setEndPoint(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && handleFindRoute()}
-        />
-      </div>
-
-      <button
-        className="predict-btn"
-        onClick={handleFindRoute}
-        style={{ marginBottom: '12px' }}
-      >
-        Find Safe Route
-      </button>
-
-      {routeResult && (
-        <div style={{
-          background: '#f0fdf4',
-          border: '1px solid #bbf7d0',
-          borderRadius: '6px',
-          padding: '12px',
-          fontSize: '12px'
-        }}>
-          <div style={{ marginBottom: '8px' }}>
-            <strong style={{ color: '#15803d' }}>Route Analysis</strong>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', color: '#1e293b' }}>
-            <div>
-              <span style={{ color: '#64748b' }}>Flooded segments avoided:</span>
-              <span style={{ float: 'right', fontWeight: 600 }}>
-                {routeResult.floodedSegmentsAvoided}
-              </span>
-            </div>
-            <div>
-              <span style={{ color: '#64748b' }}>Extra distance:</span>
-              <span style={{ float: 'right', fontWeight: 600 }}>
-                {routeResult.distanceDifference.toFixed(1)} km
-              </span>
-            </div>
-            <div>
-              <span style={{ color: '#64748b' }}>Additional time:</span>
-              <span style={{ float: 'right', fontWeight: 600 }}>
-                {routeResult.timeDifference.toFixed(0)} min
-              </span>
-            </div>
-          </div>
-
-          <button
-            className="predict-btn"
-            onClick={handleReset}
-            style={{
-              marginTop: '10px',
-              background: '#6b7280',
-              fontSize: '12px',
-              padding: '8px'
-            }}
-          >
-            Clear Route
-          </button>
-        </div>
-      )}
-
-      {!routeResult && (
-        <div style={{
-          background: '#fef3c7',
-          border: '1px solid #fcd34d',
-          borderRadius: '6px',
-          padding: '12px',
-          fontSize: '12px',
-          color: '#92400e'
-        }}>
-          <strong>Tip:</strong> Enter locations or click on the map to select route points. The system will avoid flooded roads.
-        </div>
-      )}
+    <div className={`route-col ${tone}`}>
+      <span className="route-label"><i />{label}</span>
+      <span className="route-big mono">{route.length_km.toFixed(2)} km</span>
+      <span className="mono">~{Math.round(route.minutes)} min</span>
+      <span className={route.flooded_segments ? 'bad' : 'good'}>
+        {route.flooded_segments ? `${route.flooded_segments} flooded segments` : 'no segment ≥ 15 cm'}
+      </span>
+      <span className="muted">max depth <span className="mono">{cm(route.max_depth)}</span></span>
     </div>
   );
-};
+}
 
-export default RoutePanel;
+export default function RoutePanel({ state, onPick, onClear, t }) {
+  const { start, end, pick, result, loading, error } = state;
+  const { normal, safe } = result || {};
+
+  return (
+    <section className="card panel">
+      <div className="panel-head">
+        <h2>Flood-aware routing</h2>
+        {(start || end) && (
+          <button type="button" className="btn ghost small" onClick={onClear}>Clear</button>
+        )}
+      </div>
+      <p className="hint">
+        For ambulances, fire tenders and patrol vehicles. Roads over 30 cm are treated as closed; 15–30 cm is
+        heavily penalised.
+      </p>
+
+      <div className="pick-row">
+        <button type="button" className={`btn pick${pick === 'start' ? ' active' : ''}`} onClick={() => onPick(pick === 'start' ? null : 'start')}>
+          <span className="pin pin-a small">A</span>
+          {start ? 'Move start' : 'Set start'}
+        </button>
+        <button type="button" className={`btn pick${pick === 'end' ? ' active' : ''}`} onClick={() => onPick(pick === 'end' ? null : 'end')}>
+          <span className="pin pin-b small">B</span>
+          {end ? 'Move destination' : 'Set destination'}
+        </button>
+      </div>
+
+      {loading && <p className="hint">Routing at {offsetLabel(t)}…</p>}
+      {error && <p className="callout warn">{error}</p>}
+
+      {normal && (
+        <>
+          <div className="route-compare">
+            <RouteStats label="Shortest" route={normal} tone="plain" />
+            {safe ? (
+              <RouteStats label="Flood-aware" route={safe} tone="safe" />
+            ) : (
+              <div className="route-col blocked">
+                <span className="route-label">Flood-aware</span>
+                <span className="bad">No route below 30 cm exists at {offsetLabel(t)}.</span>
+                <span className="muted">Scrub the timeline to find when the corridor reopens.</span>
+              </div>
+            )}
+          </div>
+          {result.same_route && <p className="callout">The shortest route is already the safest at this time.</p>}
+          {safe && !result.same_route && normal.flooded_roads.length > 0 && (
+            <div className="avoided">
+              <span className="sub-head">Avoids</span>
+              <ul>
+                {normal.flooded_roads.slice(0, 5).map((r) => (
+                  <li key={r.name}><span>{r.name}</span><span className="mono">{cm(r.depth)}</span></li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+      {!normal && !loading && !error && (start || end) && (
+        <p className="hint">Now set {start ? 'the destination (B)' : 'the start (A)'} on the map.</p>
+      )}
+    </section>
+  );
+}

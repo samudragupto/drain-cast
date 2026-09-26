@@ -1,333 +1,116 @@
-# DrainCast Methodology
+# Methodology
 
-## Flood Prediction Approach
+DrainCast is a **screening model**. For every street segment in a ward it estimates standing water on a 5-minute step over the next three hours. It does this by coupling three things that rainfall-only forecasts treat separately:
 
-DrainCast uses a **coupled physical model** that integrates rainfall, terrain, and drainage infrastructure to predict street-level flooding. This document explains the scientific foundation.
+1. how much rain falls,
+2. how much of it the storm-drain network can take away, and
+3. where the ground sends whatever is left.
 
-## Three Coupling Factors
+It is not a hydraulic solver such as SWMM or HEC-RAS 2D. It trades physical detail for speed: a full run for a 1,000-segment ward takes 50–170 ms in pure Python. That speed is what lets the dashboard re-run on every slider move.
 
-### 1. Rainfall-Runoff Coupling
+## 1. Inputs per ward
 
-**Problem:** Rain doesn't immediately disappear—it runs off impervious surfaces (roads, roofs) toward drains.
+Built by `tools/build_ward_data.py`.
 
-**Solution:** Calculate surface runoff volume using:
+| Item | How it is derived |
+|---|---|
+| Street segments | OSM ways (trunk down to residential), clipped to the ward box and split at junctions. Only the largest connected component is kept, so routing is coherent. |
+| Width, frontage | Width comes from the OSM `width` tag or a per-class default (trunk 20 m … lane 4 m). Frontage is the strip of plots on each side that drains to the road: 12–30 m per side by class. |
+| Catchment area | `length × (width + 2 × frontage)` |
+| Gully inlets | One every 30 m, both sides on roads 9 m wide or more. Each takes 12 L/s × the ward condition factor. |
+| Elevation | SRTM 30 m at every junction and segment midpoint, with one smoothing pass over neighbouring junctions. |
+| Manholes | Junctions grouped on a 110 m grid; one manhole per group, at its lowest point. |
+| Outfalls | The lowest ~10% of manholes on the ward edge, plus the two lowest manholes overall (lakes and nallahs inside the ward). |
+| Pipes | A multi-source Dijkstra from the outfalls over the street-adjacency graph, with uphill runs penalised. This gives every manhole one downstream neighbour, so the network is a tree. |
+| Pipe size | Design flow `Q = C · i_design · A_upstream`, then the smallest standard diameter (300–2400 mm) whose Manning full-bore capacity (n = 0.015, gradient ≥ 1:1000) carries it. |
+| Pipe condition | The ward siltation factor (0.60–0.70) × U(0.85, 1.15). About 12% of pipes are stepped down one size and de-rated further, to represent legacy or undersized drains. The build is seeded, so it is reproducible. |
 
-```
-Runoff Volume (m³) = Rainfall Intensity (mm/hr) × Road Area (m²) × Impervious Coefficient
-                   = (I mm/hr) × (A m²) × 0.85
-```
+### Ward parameters
 
-**Why 0.85?**
-- Asphalt/concrete: 85% of rain becomes runoff
-- Some water is retained in surface irregularities
-- Typical urban impervious coefficient range: 0.75-0.95
+| Ward | Runoff C | Design intensity | Condition | Basis |
+|---|---|---|---|---|
+| Kurla East | 0.90 | 25 mm/h | 0.70 | Legacy BMC standard of 25 mm/h at low tide |
+| T. Nagar | 0.90 | 35 mm/h | 0.65 | Assumed |
+| Velachery | 0.85 | 35 mm/h | 0.60 | Assumed; heavy siltation reported |
+| Saidapet | 0.88 | 35 mm/h | 0.65 | Assumed |
+| West Tambaram | 0.80 | 30 mm/h | 0.60 | Assumed; less dense |
 
-**Timeline Adjustment:**
-As time progresses, rainfall accumulates non-linearly:
-```
-Adjusted Runoff = Base Runoff × (1 + 0.15 × Timeline)
-```
-This models the observation that storm intensity often increases over the first 1-2 hours.
+The Chennai design intensities are assumptions. Replacing them with Greater Chennai Corporation and Tambaram Corporation design figures is the first thing to do with real data.
 
-### 2. Drainage-Runoff Coupling
+## 2. Terrain conditioning
 
-**Problem:** Runoff must flow through drainage networks with finite capacity.
+SRTM in dense cities includes building heights and 1–2 m of noise. Used raw, it creates pits several metres deep that trap water forever. Before simulating, we therefore run a **priority-flood** from the ward edge over the street graph. Every pit is filled up to its spill level, but at most **0.6 m** deep. Real sags such as subways and low junctions survive; SRTM noise does not.
 
-**Solution:** Model drainage system as directed graph:
+Low segments on the ward edge (the lowest 30% by elevation) are **overland outlets**. Water above kerb height there leaves the study area.
 
-```
-Drainage Network = {Nodes, Edges}
-
-Node = Manhole or inlet point
-  - Attributes: location, elevation, capacity (L/s)
-  
-Edge = Underground pipe
-  - Attributes: diameter, length, capacity, slope
-```
-
-**Capacity Analysis:**
-```
-Available Capacity = Node Capacity - Incoming Flow
-Available Capacity = min(node_capacity, downstream_capacity)
-```
+## 3. Time step (Δt = 5 min)
 
-For bottleneck detection, use BFS to find minimum capacity in downstream path:
+The run starts **30 minutes before now** (warm-up), so the network is already carrying water when the forecast window opens.
 
-```python
-def analyze_bottleneck(node):
-    min_cap = node.capacity
-    for successor in graph.successors(node):
-        downstream = analyze_bottleneck(successor)  # Recursive
-        min_cap = min(min_cap, downstream)
-    return min_cap
-```
+For each segment *s* with ponded volume *Vₛ*:
 
-**Why Drainage Matters:**
-- Total runoff > Available capacity = Water overflow
-- Overflow occurs at weakest link (bottleneck)
-- Simple sum of capacities is insufficient
+1. **Runoff**
+   `Vₛ += C · i(t) · A_catch,s · Δt`
 
-### 3. Terrain-Flooding Coupling
-
-**Problem:** Water doesn't accumulate uniformly—it pools in low-lying areas.
-
-**Solution:** Calculate slope factor:
-
-```
-Slope Factor = f(elevation_gradient)
-
-  Strong depression    (slope < -0.05): factor = 1.4  (water accumulates)
-  Mild depression      (slope < -0.02): factor = 1.2
-  Slight depression    (slope < -0.01): factor = 1.1
-  Flat terrain         (slope ≈ 0.00):  factor = 1.0  (neutral)
-  Slight elevation     (slope < 0.01):  factor = 1.0
-  Mild elevation       (slope < 0.02):  factor = 0.9  (water drains)
-  Steep elevation      (slope > 0.05):  factor = 0.8  (fast drainage)
-```
-
-**Physics:**
-- Negative slope = gravity accumulates water
-- Positive slope = gravity helps drainage
-- Slope derived from DEM or survey data
-
-## Water Depth Estimation
-
-### Core Formula
-
-```
-Water Depth (cm) = (Excess Volume in Liters) / (Road Area in m²) × 10
-                 = (Runoff - Drain Capacity) / Area × 10
-```
-
-**Steps:**
-
-1. **Calculate runoff volume (liters):**
-   ```
-   V_runoff = (60 mm/hr) × (2400 m²) × 0.85 × 2 hours
-            = 60 × 2400 × 0.85 × 2 / 1000  [convert mm to m]
-            = 244.8 m³ = 244,800 liters
-   ```
-
-2. **Get drainage capacity for timeline:**
-   ```
-   Capacity = 1200 L/s × 3600 s/hr × 2 hr = 8,640,000 liters
-   (Actually, capacity per hour: 1200 × 3600 = 4,320,000 L/hr)
-   ```
-
-3. **Calculate excess:**
-   ```
-   Excess = max(0, 244,800 - 4,320,000) = 0 liters
-   Depth = 0 / 2400 × 10 = 0 cm  (No flood in this case)
-   ```
-
-4. **Apply terrain factor:**
-   ```
-   Depth_adjusted = Depth × Slope Factor
-   If slope = -0.015 (mild depression): factor = 1.1
-   Depth = 0 × 1.1 = 0 cm
-   ```
-
-## Risk Classification
-
-```
-Water Depth (cm)     │ Classification │ Color │ Vehicle Impact
-─────────────────────┼─────────────────┼───────┼──────────────────────
-< 5                  │ Low Risk        │ Green │ Safe passage
-5 - 15               │ Moderate Risk   │ Yellow│ Caution; slow down
-15 - 30              │ High Risk       │ Orange│ Avoid; high water
-> 30                 │ Critical        │ Red   │ IMPASSABLE; 2-wheeler dies
-```
-
-**Why These Thresholds?**
-- 5 cm: Normal vehicle undercarriage clearance
-- 15 cm: Two-wheeler stability issues
-- 30 cm: Water enters engine; vehicle stalling
-- 45+ cm: Amphibious vehicles only
-
-## Nowcasting (0-3 Hour Prediction)
-
-### Rainfall Pattern Simulation
-
-DrainCast simulates four common rainfall patterns:
-
-#### 1. **Light Buildup** (< 30 mm/hr)
-- Hour 0: 100% intensity
-- Hour 1: 115% (storm intensifying)
-- Hour 2: 125% (peak)
-- Hour 3: 120% (maintaining)
-
-#### 2. **Moderate Steady** (30-60 mm/hr)
-- Hours 0-3: Near-constant intensity (±5% variation)
-- Models continuous moderate rainfall
-
-#### 3. **Heavy Decay** (> 60 mm/hr)
-- Hour 0: 100% intensity
-- Hour 1: 95% (beginning to diminish)
-- Hour 2: 85%
-- Hour 3: 70% (moving out)
+2. **Inlet demand**
+   `dₛ = min(Vₛ / Δt, inlet_capₛ)`
 
-#### 4. **Convective Peak** (Thunderstorm)
-- Hour 0: 100%
-- Hour 1: 140% (peak intensity)
-- Hour 2: 130% (still strong)
-- Hour 3: 50% (rapid decay)
-
-### Pattern Selection
+3. **Network routing.** Manholes are visited in topological order, upstream first. For manhole *m* with upstream pipe inflow *U* and outgoing capacity *Q_m*:
+   - If `U ≥ Q_m`: no local inflow is accepted, and `(U − Q_m)·Δt` **surcharges** back onto the streets attached to *m*.
+   - Otherwise: local inlets are accepted up to `Q_m − U`, pro rata.
+   - The outflow `min(U + accepted, Q_m)` goes to the downstream manhole, or leaves through the outfall.
+   - The load `(U + Σd) / Q_m` is recorded for the map.
 
-```python
-if rainfall_intensity < 30:
-    pattern = "light_buildup"
-elif rainfall_intensity < 60:
-    pattern = "moderate_steady"
-elif rainfall_intensity < 75:
-    pattern = "heavy_decay"
-else:
-    pattern = "convective_peak"  # Very rare locally
-```
+   With *outfalls blocked* on (high tide, or a river or canal in spate), outfall capacity is multiplied by 0.5.
 
-### Prediction Confidence
+4. **Overland flow.** For every pair of segments sharing a junction, the water-surface levels `zᵢ + hᵢ` are compared. A volume `0.5 × Δh / (1/Aᵢ + 1/Aⱼ) / max(degree)` moves from the higher surface to the lower one. It is limited to what the donor holds above a 3 mm detention depth, divided among its neighbours. Water therefore runs downhill, fills low junctions and spills over once they are full.
 
-Confidence decreases exponentially with time:
+5. **Depth (stage–storage)**
+   - `h = V / A_road` while `h ≤ 0.15 m` (inside the kerbs)
+   - `h = 0.15 + (V − 0.15·A_road) / A_catch` above that (spreading over footpaths and frontage)
 
-```
-Confidence = Base × e^(-0.5 × Hours)
-
-Hour 0: 85% confidence (now)
-Hour 1: 52% confidence
-Hour 2: 32% confidence
-Hour 3: 20% confidence
-```
-
-**Why?** Weather is chaotic; longer forecasts are inherently less certain.
-
-## Flood-Safe Routing
-
-### Pathfinding Algorithm
-
-Uses **Dijkstra's algorithm** with weighted edges:
-
-```
-Base Weight = Road Distance (km)
-
-Final Weight = {
-  Base × 1.0,  if risk = LOW or MODERATE
-  Base × 10.0, if risk = HIGH
-  Base × 100.0 if risk = CRITICAL  (avoid at all costs)
-}
-```
-
-### Route Comparison
-
-**Normal Route:** Shortest distance (ignores flood risk)
-**Safe Route:** Highest weight but most flood-free
-
-**Trade-off Metrics:**
-- Distance difference (km)
-- Time difference (minutes) ≈ Distance / 40 km/h
-
-### Example
-```
-Normal Route: 5 km, but passes through CRITICAL area
-Safe Route:   6.8 km, completely avoids flooding
-Trade-off:    +1.8 km, +2.7 minutes for safety
-```
-
-## Model Limitations & Caveats
-
-### Current Assumptions
-
-1. **Runoff coefficient is constant**
-   - Reality: Changes with soil saturation, season
-   - Recommendation: Use satellite-derived impervious maps
-
-2. **Linear capacity-flow relationship**
-   - Reality: Pipe capacity varies with sediment, age
-   - Recommendation: Integrate IoT sensor data
-
-3. **No surface roughness**
-   - Reality: Rough surfaces slow water, increase retention
-   - Recommendation: Add Manning's coefficient by road type
-
-4. **Instantaneous drainage response**
-   - Reality: Pipes have inertia, backflow delays
-   - Recommendation: Add dynamic delay models
-
-5. **No lateral flow between streets**
-   - Reality: Water spreads sideways on flat terrain
-   - Recommendation: Use 2D hydraulic model (HEC-RAS)
-
-### When Model Fails
-
-- **Monsoon onset:** First heavy rain overwhelms calibration
-- **Coastal storm surge:** Tidal backflow not modeled
-- **Infrastructure failure:** Blocked drains assumed open
-- **Extreme events:** >100mm/hr outside training range
-
-## Validation Against Reality
-
-### Ideal Verification Workflow
-
-1. **Historical rainfall data** from IMD weather stations
-2. **Observed flooding** from citizen reports or satellite
-3. **Hindcast:** Run model on past events
-4. **Compare:** Predicted depth vs. reported depth
-5. **Calibrate:** Adjust coefficients
-
-### Current Status
-
-✓ Physically reasonable model  
-✓ Passes sensitivity analysis  
-⚠ Awaiting real validation data  
-⚠ Coefficients from literature (not field-tuned)
-
-## Enhancement Roadmap
-
-### Phase 1 (Now): Hackathon
-- Rule-based coupling logic
-- Sample data for demo ward
-- Simplified terrain model
-
-### Phase 2 (6 months): Production
-- Real municipal drainage data
-- Live IMD weather integration
-- Calibrated coefficients
-- Historical validation
-
-### Phase 3 (1 year): Advanced
-- Machine learning for capacity prediction
-- 2D shallow-water equations (hydraulics)
-- Coupled storm-surge model
-- Real-time sensor fusion
-
-### Phase 4 (2+ years): Operations
-- Multi-city deployment
-- IoT drain monitoring
-- Emergency service integration
-- Public mobile app
-
-## References
-
-### Physics
-- Manning's Equation (flow velocity)
-- Shallow water equations (hydraulics)
-- Conservation of mass (continuity)
-
-### Urban Flood Science
-- EPA Stormwater Manual
-- FEMA Flood Map Technical Reference
-- World Bank Urban Flooding Guidelines
-
-### Data Sources
-- USGS SRTM DEM (elevation)
-- OpenStreetMap (road network)
-- Municipal Records (drainage data)
-
----
-
-**Disclaimer:** This model is simplified for hackathon demonstration. Production use requires:
-- Professional hydraulic engineer review
-- Real field data calibration
-- Peer-reviewed validation
-- Regular recalibration with observed data
-
-**Last Updated:** January 2026
+**Mass balance.** Rain = water to outfalls + water on streets + water that left overland. `tests/test_engine.py` checks this to within rounding.
+
+## 4. Risk bands
+
+| Depth | Band | Why this threshold |
+|---|---|---|
+| < 5 cm | Low | Kerb-side ponding only |
+| 5–15 cm | Moderate | Slows traffic; gully gratings hidden |
+| 15–30 cm | High | Two-wheelers and small-car exhausts stall |
+| > 30 cm | Critical | Cars stall; open manholes are invisible |
+
+## 5. Routing
+
+The street graph is a NetworkX `MultiGraph`: junctions are nodes and segments are edges. At the chosen time step:
+
+- **Shortest route:** plain length.
+- **Flood-aware route:** length × 2 for 5–15 cm, × 10 for 15–30 cm, and removed entirely at 30 cm or more.
+
+Travel time assumes 22 km/h dry, 14 km/h at 5–15 cm and 6 km/h at 15–30 cm. If no route stays below 30 cm, the dashboard says so rather than inventing one.
+
+## 6. Rainfall
+
+**Design storms** are built on the 5-minute grid:
+- *Steady*: constant.
+- *Building*: ramps from 25% to 100% over the first two hours.
+- *Cloudburst*: an asymmetric triangle peaking about 45 minutes from now.
+- *Passing*: exponential decay with τ = 70 min.
+
+**Live mode** uses Open-Meteo `minutely_15` precipitation (the preceding 15-minute sum × 4 = mm/h) for the ward centre. It is interpolated model output, not radar, and it refreshes every 10 minutes. An IMD Doppler nowcast would be a drop-in replacement for `fetch_live_rainfall`.
+
+## 7. What this model does not do
+
+- **No real drain survey.** The network is synthesised. Depths depend strongly on pipe sizes, so treat them as relative.
+- **No validation yet** against observed depths, such as BMC or GCC waterlogging-point logs or crowd reports from 2023–25 events.
+- **No pipe storage and no backwater along pipes.** Surcharge appears at the first bottleneck only.
+- **No infiltration.** It is small in these wards but not zero: Velachery and Tambaram have open plots.
+- **Dry start.** The network is empty at −30 min. Antecedent rain from earlier in the day is ignored.
+- **The ward box is the domain.** Water from uphill areas outside the box is not added.
+
+## 8. Next steps with real data
+
+1. Load the corporation's SWD GIS layers (nodes, pipe sizes, invert levels) in place of the synthesised network.
+2. Calibrate C, the condition factors and the inlet capacity against logged waterlogging points for two or three past events per ward.
+3. Replace SRTM with the corporation's LiDAR or total-station levels for the carriageway.
+4. Feed IMD radar nowcasts and tide tables (Mumbai) or river gauges (Adyar) in place of the scenario toggles.

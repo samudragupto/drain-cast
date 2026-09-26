@@ -1,268 +1,178 @@
-"""
-Graph Builder: Constructs and analyzes drainage network
-Uses NetworkX for directed graph representation
-"""
+"""Load a ward's datasets and build its road graph and drainage graph."""
+
+import json
+import logging
+import math
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 import networkx as nx
-import math
-import logging
-from typing import Dict, List
+
+from terrain_processor import (
+    adjacency_pairs,
+    boundary_segments,
+    condition_elevations,
+    find_sags,
+    overland_outlets,
+    segment_adjacency,
+)
 
 logger = logging.getLogger(__name__)
 
-def build_drainage_graph(nodes_json, edges_json):
-    """
-    Build directed graph of drainage network
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-    Nodes: Drainage points (manholes, inlets)
-    Edges: Pipes connecting nodes with capacity weights
 
-    Args:
-        nodes_json: List of drainage node dictionaries
-        edges_json: List of pipe edge dictionaries
+@dataclass
+class Ward:
+    meta: dict
+    roads: dict                     # GeoJSON FeatureCollection as served to the map
+    segments: list                  # per-road dicts, index-aligned with roads["features"]
+    drain_nodes: list
+    drain_edges: list
+    boundary: dict
+    drainage: nx.DiGraph            # manhole -> downstream manhole
+    road_graph: nx.MultiGraph       # junction -- junction, one edge per road segment
+    manhole_order: list             # topological, upstream first
+    segs_by_manhole: dict           # manhole id -> [segment index] draining into it
+    spill_segs: dict                # manhole id -> [segment index] that receive surcharge
+    pairs: list                     # (i, j) road pairs that share a junction
+    degree: list                    # seg index -> number of connected roads
+    outlets: list                   # seg index -> bool, surface water can leave the ward here
+    sag: list                       # seg index -> bool, local low point
 
-    Returns:
-        NetworkX DiGraph with node/edge attributes
-    """
-    G = nx.DiGraph()
 
-    # Add nodes with attributes
-    for node in nodes_json:
-        G.add_node(
-            node['id'],
-            location=tuple(node['location']),
-            elevation=node.get('elevation', 10),
-            capacity=node.get('capacity', 1000),
-            node_type=node.get('type', 'manhole')
-        )
+def haversine_m(lat1, lon1, lat2, lon2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
 
-    # Add edges with attributes
-    for edge in edges_json:
-        G.add_edge(
-            edge['from'],
-            edge['to'],
-            capacity=edge.get('capacity', 1000),
-            diameter=edge.get('pipe_diameter', 600),
-            length=edge.get('length', 100),
-            weight=1 / edge.get('capacity', 1000)  # Lower capacity = higher weight (resistance)
-        )
 
-    logger.info(f"Built drainage graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-    return G
+def _read(path: Path):
+    with path.open(encoding="utf-8") as fh:
+        return json.load(fh)
 
-def get_road_drainage_capacity(road_id, drainage_graph, road_location):
-    """
-    Find drainage capacity for a road
-    Returns capacity of connected drainage network
 
-    Args:
-        road_id: Road identifier
-        drainage_graph: NetworkX DiGraph
-        road_location: [lat, lon] of road
+@lru_cache(maxsize=1)
+def load_index() -> dict:
+    return _read(DATA_DIR / "wards.json")
 
-    Returns:
-        Available capacity in L/s
-    """
-    if not drainage_graph.number_of_nodes():
-        return 500
 
-    # Find nearest drainage node to road
-    nearest_node = find_nearest_node(road_location, drainage_graph)
+def ward_ids() -> list:
+    return [w["id"] for w in load_index()["wards"]]
 
-    if not nearest_node:
-        return 500
 
-    # Get node capacity
-    node_capacity = drainage_graph.nodes[nearest_node].get('capacity', 1000)
+@lru_cache(maxsize=None)
+def load_ward(ward_id: str) -> Ward:
+    meta = next((w for w in load_index()["wards"] if w["id"] == ward_id), None)
+    if meta is None:
+        raise KeyError(ward_id)
+    folder = DATA_DIR / "wards" / ward_id
+    roads = _read(folder / "roads.geojson")
+    elevation = _read(folder / "elevation.json")
+    drain_nodes = _read(folder / "drainage_nodes.json")
+    drain_edges = _read(folder / "drainage_edges.json")
+    boundary = _read(folder / "boundary.geojson")
 
-    # Check downstream capacity (bottleneck analysis)
-    downstream_capacity = analyze_downstream_capacity(nearest_node, drainage_graph)
+    segments = []
+    for feature in roads["features"]:
+        props = feature["properties"]
+        coords = feature["geometry"]["coordinates"]
+        mid = coords[len(coords) // 2]
+        elev = elevation.get(props["id"], {})
+        segments.append({
+            **props,
+            "coords": coords,
+            "mid": (mid[1], mid[0]),
+            "elevation_raw": elev.get("avg_elevation", 0.0),
+            "slope": elev.get("slope", 0.0),
+        })
 
-    # Use minimum of node and downstream capacity
-    return min(node_capacity, downstream_capacity)
+    drainage = build_drainage_graph(drain_nodes, drain_edges)
+    road_graph = build_road_graph(segments)
+    adjacency = segment_adjacency(segments)
+    edge_flags = boundary_segments(segments, meta["bbox"])
+    conditioned = condition_elevations([s["elevation_raw"] for s in segments], adjacency, edge_flags)
+    for seg, z in zip(segments, conditioned):
+        seg["elevation"] = round(z, 2)
 
-def find_nearest_node(location, drainage_graph):
-    """
-    Find nearest drainage node to a location
-    Location: [lat, lon]
-    """
-    if not drainage_graph.number_of_nodes():
-        return None
+    segs_by_manhole = {n["id"]: [] for n in drain_nodes}
+    for idx, seg in enumerate(segments):
+        segs_by_manhole.setdefault(seg["nearest_drain"], []).append(idx)
 
-    min_distance = float('inf')
-    nearest_id = None
+    spill_segs = {}
+    for node in drain_nodes:
+        attached = segs_by_manhole.get(node["id"], [])
+        if attached:
+            spill_segs[node["id"]] = attached
+        else:
+            lon, lat = node["location"]
+            nearest = sorted(range(len(segments)), key=lambda i: haversine_m(lat, lon, *segments[i]["mid"]))
+            spill_segs[node["id"]] = nearest[:2]
 
-    for node_id in drainage_graph.nodes():
-        node_location = drainage_graph.nodes[node_id].get('location')
-        if node_location:
-            distance = haversine_distance(location, node_location)
-            if distance < min_distance:
-                min_distance = distance
-                nearest_id = node_id
-
-    return nearest_id if min_distance < 1.0 else None  # Within ~1km
-
-def haversine_distance(loc1, loc2):
-    """
-    Calculate distance between two lat/lon points in km
-    """
-    lat1, lon1 = loc1
-    lat2, lon2 = loc2
-
-    R = 6371  # Earth radius in km
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-
-    a = math.sin(delta_phi/2) * math.sin(delta_phi/2) + \
-        math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2) * math.sin(delta_lambda/2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-    return R * c
-
-def analyze_downstream_capacity(start_node, drainage_graph, max_depth=5):
-    """
-    Analyze bottlenecks in drainage network downstream
-    Find minimum capacity in outflow paths
-
-    Args:
-        start_node: Starting node ID
-        drainage_graph: NetworkX DiGraph
-        max_depth: Maximum path depth to analyze
-
-    Returns:
-        Minimum bottleneck capacity in L/s
-    """
-    if start_node not in drainage_graph:
-        return 500
-
-    min_capacity = float('inf')
-
-    # BFS to find all downstream paths
-    visited = set()
-    queue = [(start_node, 0)]
-
-    while queue:
-        node, depth = queue.pop(0)
-
-        if node in visited or depth > max_depth:
-            continue
-
-        visited.add(node)
-        node_capacity = drainage_graph.nodes[node].get('capacity', 1000)
-        min_capacity = min(min_capacity, node_capacity)
-
-        # Explore successors
-        for successor in drainage_graph.successors(node):
-            if successor not in visited:
-                queue.append((successor, depth + 1))
-
-    return min_capacity if min_capacity != float('inf') else 500
-
-def identify_bottleneck_nodes(drainage_graph):
-    """
-    Identify critical bottleneck nodes in drainage network
-    Nodes with high in-degree and low capacity
-    """
-    bottlenecks = []
-
-    for node in drainage_graph.nodes():
-        in_degree = drainage_graph.in_degree(node)
-        capacity = drainage_graph.nodes[node].get('capacity', 1000)
-
-        # Node is critical if it receives water from multiple sources
-        if in_degree >= 2:
-            stress_factor = in_degree / (capacity / 500)
-
-            if stress_factor > 2.0:
-                bottlenecks.append({
-                    'node_id': node,
-                    'stress_factor': round(stress_factor, 2),
-                    'in_degree': in_degree,
-                    'capacity': capacity
-                })
-
-    bottlenecks.sort(key=lambda x: x['stress_factor'], reverse=True)
-    return bottlenecks
-
-def calculate_network_flow(drainage_graph, source_node, target_node):
-    """
-    Calculate maximum flow through drainage network
-    Uses min-cost max-flow algorithm
-    """
-    if source_node not in drainage_graph or target_node not in drainage_graph:
-        return 0
-
-    try:
-        # SimpleMaxFlow finds maximum flow through network
-        flow_value = nx.maximum_flow_value(
-            drainage_graph,
-            source_node,
-            target_node,
-            capacity='capacity'
-        )
-        return flow_value
-    except nx.NetworkXError:
-        return 0
-
-def find_overflow_path(drainage_graph, start_node):
-    """
-    Find path water would take if primary drain overflows
-    Based on elevation and pipe capacity
-    """
-    if start_node not in drainage_graph:
-        return []
-
-    # Dijkstra's algorithm to find path with minimum resistance
-    try:
-        path = nx.dijkstra_path(
-            drainage_graph,
-            source=start_node,
-            target=None,
-            weight='weight'
-        )
-        return path[:3] if path else []  # Return first 3 hops
-    except nx.NetworkXError:
-        return []
-
-def get_network_statistics(drainage_graph):
-    """
-    Get overall network health statistics
-    """
-    if not drainage_graph.number_of_nodes():
-        return {}
-
-    total_capacity = sum(
-        drainage_graph.nodes[n].get('capacity', 0)
-        for n in drainage_graph.nodes()
+    ward = Ward(
+        meta=meta,
+        roads=roads,
+        segments=segments,
+        drain_nodes=drain_nodes,
+        drain_edges=drain_edges,
+        boundary=boundary,
+        drainage=drainage,
+        road_graph=road_graph,
+        manhole_order=list(nx.topological_sort(drainage)),
+        segs_by_manhole=segs_by_manhole,
+        spill_segs=spill_segs,
+        pairs=adjacency_pairs(adjacency),
+        degree=[len(nbs) for nbs in adjacency],
+        outlets=overland_outlets(conditioned, edge_flags),
+        sag=find_sags(conditioned, adjacency),
     )
+    logger.info("Loaded %s: %d roads, %d manholes, %d pipes",
+                ward_id, len(segments), drainage.number_of_nodes(), drainage.number_of_edges())
+    return ward
 
-    avg_capacity = total_capacity / drainage_graph.number_of_nodes()
 
-    bottlenecks = identify_bottleneck_nodes(drainage_graph)
+def build_drainage_graph(nodes: list, edges: list) -> nx.DiGraph:
+    """Directed drainage graph. Edge u -> v is a pipe carrying flow from u down to v."""
+    graph = nx.DiGraph()
+    for node in nodes:
+        graph.add_node(
+            node["id"],
+            kind=node["type"],
+            location=tuple(node["location"]),
+            elevation=node["elevation"],
+            capacity=node["capacity"],
+        )
+    for edge in edges:
+        graph.add_edge(
+            edge["from"], edge["to"],
+            capacity=edge["capacity"],
+            diameter=edge["pipe_diameter"],
+            length=edge["length"],
+            legacy=edge.get("legacy", False),
+        )
+    if not nx.is_directed_acyclic_graph(graph):
+        raise ValueError("drainage network contains a cycle")
+    return graph
 
-    return {
-        'total_nodes': drainage_graph.number_of_nodes(),
-        'total_edges': drainage_graph.number_of_edges(),
-        'total_capacity': total_capacity,
-        'average_capacity': round(avg_capacity, 0),
-        'bottleneck_count': len(bottlenecks),
-        'network_redundancy': calculate_redundancy(drainage_graph)
-    }
 
-def calculate_redundancy(drainage_graph):
-    """
-    Measure network redundancy (alternative paths if one node fails)
-    Based on edge connectivity
-    """
-    if drainage_graph.number_of_nodes() < 2:
-        return 0
+def build_road_graph(segments: list) -> nx.MultiGraph:
+    graph = nx.MultiGraph()
+    for idx, seg in enumerate(segments):
+        start, end = seg["coords"][0], seg["coords"][-1]
+        graph.add_node(seg["from_node"], lat=start[1], lon=start[0])
+        graph.add_node(seg["to_node"], lat=end[1], lon=end[0])
+        graph.add_edge(seg["from_node"], seg["to_node"], key=idx, idx=idx, length=seg["length_m"])
+    return graph
 
-    # Try removing each node and see if network stays connected
-    # More resilient networks maintain connectivity
-    try:
-        connectivity = nx.node_connectivity(drainage_graph)
-        return min(connectivity, 3)  # Cap at 3 for simplicity
-    except:
-        return 1
+
+def downstream_path(ward: Ward, node_id: str) -> list:
+    """Manholes from node_id to its outfall, inclusive."""
+    path = [node_id]
+    while True:
+        nxt = list(ward.drainage.successors(path[-1]))
+        if not nxt:
+            return path
+        path.append(nxt[0])

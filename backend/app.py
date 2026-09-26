@@ -1,191 +1,258 @@
+"""DrainCast API."""
+
+import gzip
+import logging
+import os
+from functools import lru_cache
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import json
-import math
-from coupling_engine import calculate_flood_risk
-from graph_builder import build_drainage_graph, get_road_drainage_capacity
-from routing import calculate_safe_route
-from datetime import datetime
-import logging
+
+import coupling_engine as engine
+import nowcast_simulator as nowcast
+from graph_builder import load_index, load_ward, ward_ids
+from routing import plan_routes
+from terrain_processor import relative_elevation
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("draincast")
 
 app = Flask(__name__)
 CORS(app)
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Load data at startup
-def load_data():
-    global roads_data, drainage_nodes, drainage_edges, elevation_data
-    try:
-        with open('../data/roads.geojson', 'r') as f:
-            roads_data = json.load(f)
-        with open('../data/drainage_nodes.json', 'r') as f:
-            drainage_nodes = json.load(f)
-        with open('../data/drainage_edges.json', 'r') as f:
-            drainage_edges = json.load(f)
-        with open('../data/elevation.json', 'r') as f:
-            elevation_data = json.load(f)
-        logger.info("Data loaded successfully")
-    except Exception as e:
-        logger.error(f"Error loading data: {e}")
 
-load_data()
-drainage_graph = build_drainage_graph(drainage_nodes, drainage_edges)
+class BadRequest(Exception):
+    pass
 
-@app.route('/api/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat()})
 
-@app.route('/api/predict', methods=['POST'])
-def predict():
-    """
-    Main prediction endpoint
-    Input: rainfall_intensity (mm/hr), timeline (0-3 hours)
-    Output: roads with flood predictions
-    """
-    try:
-        data = request.json
-        rainfall_intensity = data.get('rainfall_intensity', 50)
-        timeline = data.get('timeline', 0)
+@app.errorhandler(BadRequest)
+def _bad_request(err):
+    return jsonify({"error": str(err)}), 400
 
-        # Validate inputs
-        rainfall_intensity = max(10, min(100, float(rainfall_intensity)))
-        timeline = max(0, min(3, int(timeline)))
-
-        predictions = []
-        for feature in roads_data['features']:
-            road_id = feature['properties']['id']
-            road_name = feature['properties']['name']
-            surface_area = feature['properties']['surface_area']
-            nearest_drain = feature['properties']['nearest_drain']
-
-            # Get elevation data for terrain factor
-            terrain_data = elevation_data.get(road_id, {"avg_elevation": 10, "slope": 0})
-
-            # Calculate flood risk
-            flood_data = calculate_flood_risk(
-                road_id=road_id,
-                rainfall_intensity=rainfall_intensity,
-                surface_area=surface_area,
-                timeline=timeline,
-                nearest_drain=nearest_drain,
-                terrain_data=terrain_data,
-                drainage_graph=drainage_graph
-            )
-
-            predictions.append({
-                "id": road_id,
-                "name": road_name,
-                "coordinates": feature['geometry']['coordinates'],
-                "flood_risk": flood_data['risk_level'],
-                "water_depth": round(flood_data['water_depth'], 1),
-                "runoff_volume": round(flood_data['runoff_volume'], 0),
-                "drain_capacity": round(flood_data['drain_capacity'], 0),
-                "risk_color": get_risk_color(flood_data['risk_level']),
-                "recommendation": get_recommendation(flood_data['risk_level'])
-            })
-
-        return jsonify({
-            "roads": predictions,
-            "drainage_nodes": format_drainage_nodes(),
-            "timestamp": datetime.utcnow().isoformat(),
-            "rainfall_intensity": rainfall_intensity,
-            "timeline_hours": timeline
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/api/route', methods=['POST'])
-def route():
-    """
-    Calculate flood-safe routing
-    """
-    try:
-        data = request.json
-        start = tuple(data.get('start'))
-        end = tuple(data.get('end'))
-        flood_data = data.get('current_flood_data', [])
-
-        flooded_roads = [r['id'] for r in flood_data if r['flood_risk'] in ['high', 'critical']]
-
-        # Simple pathfinding (would use real routing engine in production)
-        safe_route = calculate_safe_route(start, end, flooded_roads, roads_data)
-
-        return jsonify({
-            "normal_route": safe_route['normal'],
-            "safe_route": safe_route['safe'],
-            "avoided_roads": flooded_roads,
-            "distance_saved": round(safe_route.get('distance_difference', 0), 2),
-            "time_added": round(safe_route.get('time_difference', 0), 1)
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Routing error: {e}")
-        return jsonify({"error": str(e)}), 400
-
-@app.route('/api/ward-info', methods=['GET'])
-def ward_info():
-    """
-    Ward statistics and metadata
-    """
-    try:
-        total_roads = len(roads_data['features'])
-        total_drain_capacity = sum(n['capacity'] for n in drainage_nodes)
-
-        return jsonify({
-            "ward_name": "Kurla East",
-            "total_roads": total_roads,
-            "total_drainage_nodes": len(drainage_nodes),
-            "total_drain_capacity": total_drain_capacity,
-            "coverage_percentage": 85.5,
-            "bounds": {
-                "north": 19.0850,
-                "south": 19.0650,
-                "east": 72.8900,
-                "west": 72.8650
-            }
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-def get_risk_color(risk_level):
-    colors = {
-        'low': '#10b981',
-        'moderate': '#fbbf24',
-        'high': '#f97316',
-        'critical': '#ef4444'
-    }
-    return colors.get(risk_level, '#9ca3af')
-
-def get_recommendation(risk_level):
-    recommendations = {
-        'low': 'No action needed',
-        'moderate': 'Monitor this area',
-        'high': 'Avoid this route',
-        'critical': 'Immediate closure recommended'
-    }
-    return recommendations.get(risk_level, 'Unknown')
-
-def format_drainage_nodes():
-    return [
-        {
-            "id": node['id'],
-            "location": node['location'],
-            "capacity": node['capacity'],
-            "type": node['type']
-        }
-        for node in drainage_nodes
-    ]
 
 @app.errorhandler(404)
-def not_found(error):
+def _not_found(_):
     return jsonify({"error": "Endpoint not found"}), 404
 
+
 @app.errorhandler(500)
-def server_error(error):
+def _server_error(err):
+    logger.exception("Unhandled error: %s", err)
     return jsonify({"error": "Internal server error"}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+
+@app.after_request
+def _compress(resp):
+    """Simulation payloads are large, highly repetitive JSON; gzip cuts them ~8x."""
+    if (
+        resp.direct_passthrough
+        or resp.status_code != 200
+        or "gzip" not in request.headers.get("Accept-Encoding", "")
+        or resp.headers.get("Content-Encoding")
+        or (resp.content_length or 0) < 2048
+    ):
+        return resp
+    data = gzip.compress(resp.get_data(), compresslevel=5)
+    resp.set_data(data)
+    resp.headers["Content-Encoding"] = "gzip"
+    resp.headers["Content-Length"] = str(len(data))
+    resp.headers.add("Vary", "Accept-Encoding")
+    return resp
+
+
+def _ward(ward_id):
+    if ward_id not in ward_ids():
+        raise BadRequest(f"Unknown ward '{ward_id}'")
+    return load_ward(ward_id)
+
+
+def _scenario(body: dict) -> dict:
+    mode = body.get("mode", "scenario")
+    if mode not in ("scenario", "live"):
+        raise BadRequest("mode must be 'scenario' or 'live'")
+    pattern = body.get("pattern", "steady")
+    if pattern not in nowcast.PATTERNS:
+        raise BadRequest(f"pattern must be one of {sorted(nowcast.PATTERNS)}")
+    try:
+        intensity = float(body.get("intensity", 50))
+    except (TypeError, ValueError):
+        raise BadRequest("intensity must be a number (mm/h)")
+    return {
+        "ward": body.get("ward") or ward_ids()[0],
+        "mode": mode,
+        "pattern": pattern,
+        "intensity": max(0.0, min(200.0, round(intensity, 1))),
+        "backwater": bool(body.get("backwater", False)),
+    }
+
+
+def _rain_series(params: dict):
+    ward = _ward(params["ward"])
+    if params["mode"] == "live":
+        lat, lon = ward.meta["center"]
+        try:
+            live = nowcast.fetch_live_rainfall(lat, lon)
+        except Exception as err:
+            logger.warning("Live rainfall unavailable: %s", err)
+            raise BadRequest("Live forecast is unavailable right now (no connection to Open-Meteo). "
+                             "Use a scenario instead.")
+        return tuple(live["series"]), {k: v for k, v in live.items() if k != "series"}
+    series = nowcast.design_hyetograph(params["pattern"], params["intensity"])
+    return tuple(series), {"source": "Design storm", "description": nowcast.PATTERNS[params["pattern"]]}
+
+
+@lru_cache(maxsize=64)
+def _run(ward_id: str, series: tuple, backwater: bool) -> dict:
+    ward = load_ward(ward_id)
+    warmup = nowcast.WARMUP_MIN // nowcast.STEP_MIN
+    return engine.simulate(ward, list(series), nowcast.STEP_MIN, warmup, backwater)
+
+
+def _simulate(params: dict):
+    series, rain_meta = _rain_series(params)
+    return _run(params["ward"], series, params["backwater"]), series, rain_meta
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"status": "ok", "time": nowcast.now_ist().isoformat()})
+
+
+@app.get("/api/wards")
+def wards():
+    index = load_index()
+    return jsonify({"wards": index["wards"], "sources": index["sources"], "patterns": nowcast.PATTERNS})
+
+
+@app.get("/api/wards/<ward_id>")
+def ward_detail(ward_id):
+    ward = _ward(ward_id)
+    rel = relative_elevation([s["elevation"] for s in ward.segments])
+    roads = []
+    for seg, rel_e, sag in zip(ward.segments, rel, ward.sag):
+        roads.append({
+            "id": seg["id"],
+            "name": seg["name"],
+            "highway": seg["highway"],
+            "from_node": seg["from_node"],
+            "to_node": seg["to_node"],
+            "coordinates": seg["coords"],
+            "length_m": seg["length_m"],
+            "width_m": seg["width_m"],
+            "surface_area": seg["surface_area"],
+            "catchment_m2": seg["catchment_m2"],
+            "inlet_capacity_lps": seg["inlet_capacity_lps"],
+            "nearest_drain": seg["nearest_drain"],
+            "elevation": seg["elevation"],
+            "relative_elevation": rel_e,
+            "slope": seg["slope"],
+            "sag": sag,
+        })
+    return jsonify({
+        "meta": ward.meta,
+        "boundary": ward.boundary,
+        "roads": roads,
+        "drainage_nodes": ward.drain_nodes,
+        "drainage_edges": ward.drain_edges,
+    })
+
+
+@app.post("/api/simulate")
+def simulate():
+    params = _scenario(request.get_json(silent=True) or {})
+    result, series, rain_meta = _simulate(params)
+    return jsonify({
+        "params": params,
+        "start_time": nowcast.now_ist().isoformat(),
+        "step_minutes": nowcast.STEP_MIN,
+        "warmup_minutes": nowcast.WARMUP_MIN,
+        "rain": {"times": nowcast.step_times(), "intensity": list(series), **rain_meta},
+        **result,
+    })
+
+
+@app.post("/api/predict")
+def predict():
+    """Road-by-road prediction at one lead time (0-3 h) for a steady storm."""
+    body = request.get_json(silent=True) or {}
+    params = _scenario({
+        "ward": body.get("ward"),
+        "intensity": body.get("rainfall_intensity", 50),
+        "pattern": body.get("pattern", "steady"),
+        "backwater": body.get("backwater", False),
+    })
+    try:
+        hours = max(0, min(3, int(body.get("timeline", 0))))
+    except (TypeError, ValueError):
+        raise BadRequest("timeline must be 0, 1, 2 or 3")
+    result, _, _ = _simulate(params)
+    ward = load_ward(params["ward"])
+    frame = result["frames"][hours * 60 // nowcast.STEP_MIN]
+    roads = []
+    for seg, depth, summary in zip(ward.segments, frame["depth"], result["roads"]):
+        roads.append({
+            "id": seg["id"],
+            "name": seg["name"],
+            "coordinates": [[c[1], c[0]] for c in seg["coords"]],
+            "flood_risk": engine.classify_risk(depth),
+            "water_depth": depth,
+            "runoff_volume": summary["runoff_m3"] * 1000,
+            "drain_capacity": seg["inlet_capacity_lps"],
+            "nearest_drain": seg["nearest_drain"],
+        })
+    return jsonify({
+        "ward": params["ward"],
+        "rainfall_intensity": params["intensity"],
+        "timeline_hours": hours,
+        "timestamp": nowcast.now_ist().isoformat(),
+        "roads": roads,
+        "drainage_nodes": ward.drain_nodes,
+    })
+
+
+@app.post("/api/route")
+def route():
+    body = request.get_json(silent=True) or {}
+    params = _scenario(body)
+    try:
+        start = (float(body["start"][0]), float(body["start"][1]))
+        end = (float(body["end"][0]), float(body["end"][1]))
+    except (KeyError, TypeError, ValueError, IndexError):
+        raise BadRequest("start and end must be [lat, lon]")
+    result, _, _ = _simulate(params)
+    frame_idx = max(0, min(len(result["frames"]) - 1, int(body.get("frame", 0))))
+    depth = result["frames"][frame_idx]["depth"]
+    try:
+        routes = plan_routes(load_ward(params["ward"]), depth, start, end)
+    except ValueError as err:
+        raise BadRequest(str(err))
+    return jsonify({"frame": frame_idx, "t": result["frames"][frame_idx]["t"], **routes})
+
+
+@app.get("/api/ward-info")
+def ward_info():
+    ward = _ward(request.args.get("ward") or ward_ids()[0])
+    return jsonify({
+        **ward.meta,
+        "total_road_km": round(sum(s["length_m"] for s in ward.segments) / 1000, 1),
+        "outfalls": sum(1 for n in ward.drain_nodes if n["type"] == "outfall"),
+        "pipes": len(ward.drain_edges),
+        "legacy_pipes": sum(1 for e in ward.drain_edges if e.get("legacy")),
+        "low_points": sum(ward.sag),
+    })
+
+
+@app.get("/api/rainfall/live")
+def rainfall_live():
+    ward = _ward(request.args.get("ward") or ward_ids()[0])
+    lat, lon = ward.meta["center"]
+    try:
+        live = nowcast.fetch_live_rainfall(lat, lon)
+    except Exception as err:
+        logger.warning("Live rainfall unavailable: %s", err)
+        raise BadRequest("Live forecast is unavailable right now")
+    return jsonify({"times": nowcast.step_times(), **live})
+
+
+if __name__ == "__main__":
+    app.run(debug=True, host="127.0.0.1", port=int(os.environ.get("PORT", 5000)))

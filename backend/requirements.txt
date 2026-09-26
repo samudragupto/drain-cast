@@ -1,7 +1,4 @@
 Flask==2.3.3
-Flask-CORS==4.0.0
-NetworkX==3.1
-numpy==1.24.3
-python-dotenv==1.0.0
+Flask-Cors==4.0.0
+networkx==3.1
 gunicorn==21.2.0
-geopy==2.3.0

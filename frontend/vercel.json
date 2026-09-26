@@ -1,17 +1,3 @@
 {
-  "buildCommand": "cd frontend && npm run build",
-  "outputDirectory": "frontend/build",
-  "routes": [
-    {
-      "src": "^/api/(.*)",
-      "dest": "$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/index.html"
-    }
-  ],
-  "env": {
-    "REACT_APP_API_URL": "@react_app_api_url"
-  }
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }

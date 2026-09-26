@@ -1,421 +1,129 @@
 # DrainCast
 
-> Street-level urban flood prediction through rainfall-drainage-terrain coupling
+**Street-level flood prediction through rainfall–drainage–terrain coupling.**
+Smart India Hackathon 2026 · Problem Statement 26085
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Built for SIH 2026](https://img.shields.io/badge/Smart%20India%20Hackathon-2026-blue)](https://www.sih.gov.in/)
+Weather forecasts say how much it will rain. They don't say which streets will be under water, when, or how deep. DrainCast answers that for a ward, 0–3 hours ahead, so traffic police, fire and ambulance services and the ward disaster cell can act before the water arrives.
 
-## Problem Statement
+It covers five flood-prone wards: **Kurla East** (Mumbai) and **T. Nagar**, **Velachery**, **Saidapet** and **West Tambaram** (Chennai). Each ward uses real street geometry and terrain.
 
-Urban flooding affects millions in Indian metros annually. Traditional weather forecasts predict **when** and **how much** it will rain, but cannot answer the critical question: **"Which exact streets will flood, when, and how deep?"**
+## What you see
 
-## Solution: DrainCast
+- **Map:** every street segment is coloured by predicted standing water. Manholes turn amber near capacity and red when they surcharge.
+- **Timeline:** scrub or auto-play from *Now* to *+3 h* in 5-minute steps. The clock shows real IST times.
+- **Rainfall input:** choose a design storm (steady, building, cloudburst or passing, 5–150 mm/h) or the live Open-Meteo forecast for the ward. A toggle blocks the outfalls to model high tide or a river in spate.
+- **Situation panel:** flooded length, deepest point, overloaded drains, the worst-hit streets, and the streets that will cross 15 cm next.
+- **Street detail:** a depth curve over three hours, when the street crosses 15 cm and 30 cm, and *why* it floods: runoff against gully capacity, and which downstream manhole is the bottleneck.
+- **Flood-aware routing:** place A and B on the map to compare the shortest route with a route that avoids deep water. Both are recomputed as the timeline moves.
 
-DrainCast solves this by coupling three critical factors:
-
-1. **Real-time Rainfall Intensity** - Current precipitation rates (mm/hr)
-2. **Terrain Elevation & Slope** - Natural water accumulation zones  
-3. **Stormwater Drainage Capacity** - Network bottleneck analysis
-
-This provides **street-level flood predictions 0-3 hours in advance**, enabling:
-- 🚔 **Traffic Police** - Divert vehicles before roads flood
-- 🚨 **Emergency Services** - Pre-position resources in safe zones
-- 📋 **Municipal Authorities** - Issue targeted alerts to affected areas
-- 🚗 **Commuters** - Receive flood-safe routing recommendations
-
-## Features
-
-- 🗺️ **Street-Level Precision** - Color-coded flood risk for each road segment
-- ⏱️ **0-3 Hour Nowcasting** - Timeline-based predictions (Now, +1h, +2h, +3h)
-- 📊 **Water Depth Estimation** - Flood severity in centimeters
-- 🚗 **Flood-Safe Routing** - AI-powered alternative navigation paths
-- 📈 **Drainage Network Analysis** - Identify bottleneck nodes and capacity limits
-- 🎯 **Interactive Dashboard** - Real-time GIS visualization with Leaflet.js
-- 📱 **Responsive Design** - Works on desktop and mobile devices
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Frontend | React.js 18, Leaflet.js, Tailwind CSS |
-| Backend | Flask (Python), NetworkX, GeoPandas |
-| Database | JSON files (scalable to PostGIS) |
-| Deployment | Vercel (frontend), Railway/Render (backend) |
-| Mapping | OpenStreetMap, Leaflet |
-
-## System Architecture
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    React Frontend (Vercel)                   │
-│  • Interactive Leaflet map with flood visualization          │
-│  • Control panel for rainfall/timeline adjustment            │
-│  • Flood-safe routing interface                              │
-└─────────────────┬───────────────────────────────────────────┘
-                  │ REST API (JSON)
-                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│               Flask Backend (Railway/Render)                  │
-│  ┌──────────────┬──────────────┬──────────────────────────┐  │
-│  │ Coupling     │ Graph        │ Terrain Processor        │  │
-│  │ Engine       │ Builder      │                          │  │
-│  │              │              │ • Slope analysis         │  │
-│  │ • Rainfall   │ • Drainage   │ • DEM processing        │  │
-│  │   runoff     │   network    │ • Flow direction        │  │
-│  │ • Capacity   │   (NetworkX) │                          │  │
-│  │   analysis   │ • Bottleneck │ Routing Engine           │  │
-│  │ • Water      │   detection  │ • Pathfinding (Dijkstra)│  │
-│  │   depth      │              │ • Safe route calculation │  │
-│  └──────────────┴──────────────┴──────────────────────────┘  │
-└─────────────────┬───────────────────────────────────────────┘
-                  │
-                  ▼
-        ┌─────────────────────┐
-        │   JSON Data Files   │
-        │  • roads.geojson    │
-        │  • drainage nodes   │
-        │  • elevation.json   │
-        │  • ward boundary    │
-        └─────────────────────┘
+ rainfall (design storm / Open-Meteo)
+        │  mm/h every 5 min
+        ▼
+ ┌──────────────┐   runoff C·i·A    ┌──────────────┐  inlet capture   ┌───────────────────┐
+ │ street       │ ───────────────▶ │ ponded water │ ───────────────▶ │ manhole → pipe →  │
+ │ catchments   │                   │ on each road │ ◀─────────────── │ outfall network   │
+ └──────────────┘                   └──────┬───────┘   surcharge at   └───────────────────┘
+                                           │           bottlenecks
+                         water surfaces    │
+                         equalise between  ▼
+                         connected roads  depth = stage-storage (kerb, then frontage)
+                         (SRTM terrain)
 ```
 
-## Installation & Setup
+Each 5-minute step:
 
-### Prerequisites
+1. **Runoff.** Rainfall on each street's catchment (carriageway plus plot frontage) becomes runoff by the rational method, `q = C · i · A`.
+2. **Inlets.** Gullies take what they can, up to a capacity de-rated for blocked gratings.
+3. **Pipe network.** Manholes are processed from upstream to downstream. Each passes at most its outgoing pipe's capacity. Flow that arrives from upstream beyond that capacity *surcharges* onto the street, which is how bottlenecks flood streets whose own drains are fine.
+4. **Terrain.** Water surfaces of connected streets relax towards each other, so water runs downhill, fills low junctions and spills over.
+5. **Depth.** Water fills the carriageway up to kerb height (15 cm), then spreads over footpaths and frontage.
 
-- Node.js 18+ and npm
-- Python 3.9+
-- Git
+Risk bands: **< 5 cm** low · **5–15 cm** moderate · **15–30 cm** high (two-wheelers stall) · **> 30 cm** critical (cars stall; treated as closed for routing).
 
-### Backend Setup
+The full method, parameters and limitations are in [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 
-1. **Navigate to backend directory**
-   ```bash
-   cd backend
-   ```
+## Data
 
-2. **Create virtual environment**
-   ```bash
-   # Windows
-   python -m venv venv
-   venv\Scripts\activate
-   
-   # macOS/Linux
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
+| Layer | Source |
+|---|---|
+| Streets | OpenStreetMap via Overpass. Split at junctions: 600–1,100 segments per ward |
+| Terrain | SRTM 30 m via OpenTopoData, sampled along each street and pit-conditioned |
+| Rainfall | Parametric design storms, or the Open-Meteo 15-minute forecast |
+| Drainage | **Synthesised.** See below |
 
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+Municipal storm-water drain maps for these wards are not public. `tools/build_ward_data.py` therefore builds a plausible network:
+- It places manholes at junction clusters and routes pipes along the streets towards the lowest outfalls.
+- It sizes each pipe with Manning's equation for the ward's design intensity (25 mm/h for legacy BMC drains, 30–35 mm/h assumed for Chennai).
+- It de-rates each pipe for siltation, and randomly marks about 12% as undersized legacy pipes.
 
-4. **Run Flask server**
-   ```bash
-   python app.py
-   ```
-   Server runs on `http://localhost:5000`
+With real SWD data, only this step needs replacing. The engine reads nodes and pipes from JSON.
 
-### Frontend Setup
+## Run it locally
 
-1. **Navigate to frontend directory**
-   ```bash
-   cd frontend
-   ```
+Requirements: Python 3.10+, Node 18+.
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
-
-3. **Configure API endpoint** (optional)
-   ```bash
-   # Create .env.local
-   REACT_APP_API_URL=http://localhost:5000/api
-   ```
-
-4. **Start development server**
-   ```bash
-   npm start
-   ```
-   App opens at `http://localhost:3000`
-
-## How It Works
-
-### 1️⃣ User Input
-Set rainfall intensity (10-100 mm/hr) and select prediction timeline (0-3 hours ahead)
-
-### 2️⃣ Surface Runoff Calculation
-```
-Runoff Volume = Rainfall × Road Area × Impervious Coefficient
-              = (I mm/hr) × (A m²) × 0.85
-```
-Higher rainfall and larger impervious surfaces = more runoff
-
-### 3️⃣ Drainage Network Modeling
-Roads are connected to drainage nodes via directed graph:
-- **Nodes** = Manholes/inlet points with elevation & capacity
-- **Edges** = Pipes with flow capacity (L/s)
-- **Weight** = 1/capacity (lower capacity = higher resistance)
-
-### 4️⃣ Flood Risk Assessment
-```
-Excess Water = Runoff Volume - Available Drain Capacity
-Water Depth (cm) = Excess Water / Road Area × 100 cm
+```bash
+# terminal 1: API on :5000
+cd backend
+python -m venv venv
+venv\Scripts\activate            # macOS/Linux: source venv/bin/activate
+pip install -r requirements.txt
+python app.py
 ```
 
-### 5️⃣ Risk Classification
-| Risk Level | Water Depth | Color | Action |
-|-----------|-----------|-------|--------|
-| Low | < 5 cm | 🟢 Green | Safe for traffic |
-| Moderate | 5-15 cm | 🟡 Yellow | Monitor |
-| High | 15-30 cm | 🟠 Orange | Avoid route |
-| Critical | > 30 cm | 🔴 Red | Close immediately |
-
-### 6️⃣ Flood-Safe Routing
-- Dijkstra's algorithm finds shortest path
-- Heavy penalty weights for HIGH/CRITICAL roads
-- Returns both normal and safe routes
-- Shows distance/time trade-offs
-
-## API Documentation
-
-### Health Check
-```http
-GET /api/health
-```
-Response: `{"status": "ok", "timestamp": "2026-01-15T14:30:00"}`
-
-### Predict Flooding
-```http
-POST /api/predict
-Content-Type: application/json
-
-{
-  "rainfall_intensity": 60,
-  "timeline": 2
-}
+```bash
+# terminal 2: dashboard on :3000 (proxies /api to :5000)
+cd frontend
+npm install
+npm start
 ```
 
-Response:
-```json
-{
-  "roads": [
-    {
-      "id": "road_001",
-      "name": "Station Road",
-      "flood_risk": "high",
-      "water_depth": 18.5,
-      "runoff_volume": 1200,
-      "drain_capacity": 800,
-      "coordinates": [[lat, lon], ...]
-    }
-  ],
-  "drainage_nodes": [...],
-  "timestamp": "2026-01-15T14:30:00"
-}
-```
+Tests: `cd backend && python -m unittest discover -s tests`. They check water conservation, monotonic response to rainfall, the effect of backwater, and that routing never uses closed roads.
 
-### Calculate Safe Route
-```http
-POST /api/route
-Content-Type: application/json
+To rebuild ward data, or add a ward, edit `WARDS` in `tools/build_ward_data.py` and run `python tools/build_ward_data.py <ward-id>`. Responses are cached in `tools/.cache/`.
 
-{
-  "start": [19.0750, 72.8777],
-  "end": [19.0830, 72.8900],
-  "current_flood_data": [...]
-}
-```
+## Deploy
 
-### Ward Information
-```http
-GET /api/ward-info
-```
+- **API (Render).** `render.yaml` is included. Create a Blueprint from the repo, or a Python web service with root `backend`, build `pip install -r requirements.txt`, start `gunicorn app:app`.
+- **Dashboard (Vercel).** Import the repo with root directory `frontend`; the framework preset is Create React App. Set `REACT_APP_API_URL=https://<your-api>/api`.
 
-## Demo Script (2 Minutes)
+## API
 
-**0:00-0:15** — Opening
-> "DrainCast predicts which streets will flood 0-3 hours in advance by coupling rainfall, terrain, and drainage capacity."
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Liveness |
+| `GET /api/wards` | Wards, storm patterns, data sources |
+| `GET /api/wards/<id>` | Street, manhole and pipe geometry for one ward |
+| `POST /api/simulate` | Full 3-hour run: depth per street and load per manhole every 5 min |
+| `POST /api/predict` | Per-street prediction at one lead time (0–3 h) |
+| `POST /api/route` | Shortest vs flood-aware route at a given time step |
+| `GET /api/ward-info?ward=` | Ward statistics |
+| `GET /api/rainfall/live?ward=` | Open-Meteo series used in live mode |
 
-**0:15-0:30** — Current State
-> "This is Kurla East ward, Mumbai. Currently all roads are green—no flood risk."
+Request and response shapes are in [docs/API_DOCS.md](docs/API_DOCS.md).
 
-**0:30-0:50** — Simulate Heavy Rain
-> [Slide rainfall to 70 mm/hr, click "+2 Hours"]
-> "When it rains heavily, Station Road turns orange—predicted 18cm water depth. Why? Runoff exceeds drain capacity at this junction."
+## Demo script (2 minutes)
 
-**0:50-1:10** — Drainage Network
-> "These blue dots are drainage nodes. This one here is a bottleneck—serves 4 roads with limited capacity. If it backs up, water accumulates on surrounding streets."
+1. **0:00 · Open on Velachery.** "Every line is a real street; colour is predicted standing water. The dashed line on the rain chart is what these drains were built for."
+2. **0:15 · Cloudburst, 75 mm/h, press Play.** "Watch the first 45 minutes. Rain crosses the design line, manholes go amber then red, and orange spreads out from the low ground by the lake."
+3. **0:45 · Pause at about +1 h and click the top hotspot.** "The panel shows when this street crosses 15 cm and why. Its own gullies can cope; a manhole downstream is over capacity and pushing water back up."
+4. **1:10 · Set A and B across the ward.** "The shortest route runs through flooded segments; the flood-aware one is a little longer and stays shallow. Scrub the timeline and the route changes with the water."
+5. **1:35 · Tick 'outfalls blocked' and switch to Kurla East.** "High tide in Mumbai closes the outfalls. Same rain, more flooding: that coupling is exactly what a rain-only forecast misses."
+6. **1:50 · Close.** "Five wards in two cities from open data. Plug in the corporation's drain survey and the live IMD feed, and it runs on any ward."
 
-**1:10-1:30** — Safe Routing
-> [Enter route A→B]
-> "Normal route goes through flooded Station Road. Our system suggests this safer path, avoiding high-risk areas, adding only 2 km and 8 minutes."
+## Limitations
 
-**1:30-1:50** — Impact
-> "This helps traffic police, emergency services, and municipal teams make real-time decisions. Predictions are specific to streets, not just 'downtown might flood.' "
+This is a screening model built in hackathon time, and it has not been validated against observed flood depths. Specifically:
+- Drains are synthesised.
+- SRTM has metre-level noise in dense areas.
+- Pipes have no storage and no backwater along their length.
+- Every run starts from a dry network 30 minutes before *now*.
 
-**1:50-2:00** — Close
-> "DrainCast is scalable—any city with drainage data can deploy it. For Smart India Hackathon, we're demonstrating viability in Kurla East with 30 road segments and 8 drainage nodes."
+Use it to rank streets and time decisions, not to quote exact depths. [docs/METHODOLOGY.md](docs/METHODOLOGY.md) lists what we would do next.
 
-## Project Structure
+## Licence
 
-```
-draincast/
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── Map.jsx             # Leaflet map with flood visualization
-│   │   │   ├── ControlPanel.jsx    # Rainfall/timeline controls
-│   │   │   ├── InfoPanel.jsx       # Road details on click
-│   │   │   ├── RoutePanel.jsx      # Flood-safe routing
-│   │   │   ├── Legend.jsx          # Color code legend
-│   │   │   └── Header.jsx          # App header with stats
-│   │   ├── utils/
-│   │   │   ├── api.js              # Backend API calls
-│   │   │   └── mapStyles.js        # Color schemes & utilities
-│   │   ├── App.jsx                 # Main app component
-│   │   ├── App.css                 # Global styles
-│   │   └── index.js                # Entry point
-│   ├── public/
-│   │   └── index.html
-│   ├── package.json
-│   └── vercel.json
-├── backend/
-│   ├── app.py                      # Flask API server
-│   ├── coupling_engine.py          # Runoff + drainage logic
-│   ├── graph_builder.py            # Drainage network graph
-│   ├── terrain_processor.py        # DEM & slope analysis
-│   ├── routing.py                  # Pathfinding
-│   ├── nowcast_simulator.py        # Rainfall timeline
-│   ├── requirements.txt
-│   └── runtime.txt
-├── data/
-│   ├── roads.geojson               # 30 road segments (sample)
-│   ├── drainage_nodes.json         # 8 drainage points
-│   ├── drainage_edges.json         # 12 pipe connections
-│   ├── elevation.json              # Slope data
-│   └── ward_boundary.geojson       # Ward polygon
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── METHODOLOGY.md
-│   ├── SETUP.md
-│   └── API_DOCS.md
-├── README.md
-├── LICENSE
-└── .gitignore
-```
-
-## Deployment
-
-### Frontend (Vercel)
-
-1. Push code to GitHub
-2. Import project in Vercel dashboard
-3. Build settings:
-   - Build command: `cd frontend && npm run build`
-   - Output directory: `frontend/build`
-4. Environment variables:
-   - `REACT_APP_API_URL`: Your backend URL
-5. Deploy!
-
-### Backend (Railway/Render)
-
-1. Create new project and connect GitHub
-2. Settings:
-   - Root directory: `backend`
-   - Start command: `gunicorn app:app`
-   - Runtime: Python 3.9+
-3. Add environment variables if needed
-4. Deploy!
-
-## Data Sources
-
-- **Elevation**: SRTM DEM via USGS
-- **Roads**: OpenStreetMap (via Overpass API)
-- **Drainage**: Municipal records + OSM inference
-- **Rainfall**: Simulated nowcast (IMD integration ready)
-
-## Code Quality
-
-### Python (Backend)
-- ✅ Type hints on all functions
-- ✅ Modular code (<50 lines per function)
-- ✅ PEP 8 compliant
-- ✅ Logging instead of print statements
-- ✅ Try/except error handling
-
-### JavaScript (Frontend)
-- ✅ Functional React components with hooks
-- ✅ Descriptive variable naming
-- ✅ ESLint compliant
-- ✅ Responsive Tailwind CSS design
-- ✅ Clean separation of concerns
-
-## Testing Checklist
-
-- [x] API endpoints return correct flood data
-- [x] Map renders roads with correct colors
-- [x] Timeline buttons update predictions smoothly
-- [x] Clicking road shows accurate info panel
-- [x] Routing avoids HIGH/CRITICAL roads
-- [x] Legend color matches actual map
-- [x] No console errors
-- [x] Backend responses < 2 seconds
-- [x] Mobile view is functional
-- [x] README instructions work for fresh setup
-
-## Performance Metrics
-
-| Metric | Target | Achieved |
-|--------|--------|----------|
-| Map load time | < 3s | 1.2s |
-| Prediction calculation | < 2s | 0.8s |
-| Route finding | < 1.5s | 0.6s |
-| UI responsiveness | 60 FPS | 58 FPS |
-
-## Future Enhancements
-
-- 🌡️ **Live Doppler Radar** - Real-time IMD rainfall feeds
-- 📱 **Mobile App** - iOS/Android native apps
-- 🤖 **ML Capacity Prediction** - Predict drain capacity degradation
-- 🌍 **Multi-City Scaling** - Deploy to 10+ Indian cities
-- 📡 **IoT Integration** - Real sensor data from drain networks
-- 🔔 **Push Notifications** - Instant alerts to mobile users
-- 📊 **Historical Analytics** - Learn patterns from past floods
-
-## Contributing
-
-This project was built for Smart India Hackathon 2026 (Problem Statement #26085). 
-
-To contribute:
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push and create a Pull Request
-
-## License
-
-MIT License — See [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Ministry of Earth Sciences (MoES)
-- India Meteorological Department (IMD)
-- National Centre for Medium Range Weather Forecasting (NCMRWF)
-- OpenStreetMap Contributors
-- Smart India Hackathon 2026 Team
-
-## Contact & Support
-
-For questions or issues:
-- Open an [issue on GitHub](https://github.com/yourusername/draincast/issues)
-- Email: [your-email@example.com]
-
----
-
-**Built for Smart India Hackathon 2026**  
-**Problem Statement ID:** 26085  
-**Domain:** Urban Flood Nowcasting  
-
-🌊 Predicting floods, saving lives, one street at a time.
+MIT. Map data © OpenStreetMap contributors (ODbL). Basemap © Esri. Elevation: NASA SRTM.

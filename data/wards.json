@@ -1,0 +1,119 @@
+{
+  "sources": {
+    "roads": "OpenStreetMap contributors (ODbL), via Overpass API",
+    "elevation": "SRTM 30 m via OpenTopoData",
+    "drainage": "Synthesised from road network; see docs/METHODOLOGY.md"
+  },
+  "wards": [
+    {
+      "id": "mumbai-kurla-east",
+      "name": "Kurla East",
+      "city": "Mumbai",
+      "bbox": [
+        19.06,
+        72.88,
+        19.076,
+        72.896
+      ],
+      "center": [
+        19.068,
+        72.888
+      ],
+      "runoff_coeff": 0.9,
+      "design_intensity": 25,
+      "condition": 0.7,
+      "outfall_kind": "tidal creek outfall",
+      "notes": "L-Ward. Legacy BMC storm drains were designed for 25 mm/h at low tide; outfalls are tide-locked at high tide.",
+      "road_count": 862,
+      "drain_count": 167
+    },
+    {
+      "id": "chennai-t-nagar",
+      "name": "T. Nagar",
+      "city": "Chennai",
+      "bbox": [
+        13.033,
+        80.227,
+        13.047,
+        80.241
+      ],
+      "center": [
+        13.04,
+        80.234
+      ],
+      "runoff_coeff": 0.9,
+      "design_intensity": 35,
+      "condition": 0.65,
+      "outfall_kind": "canal outfall",
+      "notes": "Dense commercial core; drains discharge towards the Mambalam canal.",
+      "road_count": 606,
+      "drain_count": 152
+    },
+    {
+      "id": "chennai-velachery",
+      "name": "Velachery",
+      "city": "Chennai",
+      "bbox": [
+        12.973,
+        80.21,
+        12.988,
+        80.225
+      ],
+      "center": [
+        12.9805,
+        80.2175
+      ],
+      "runoff_coeff": 0.85,
+      "design_intensity": 35,
+      "condition": 0.6,
+      "outfall_kind": "lake / marsh outfall",
+      "notes": "Built over the Velachery lake catchment next to Pallikaranai marsh; one of the worst-hit areas in 2015 and 2023.",
+      "road_count": 1083,
+      "drain_count": 214
+    },
+    {
+      "id": "chennai-saidapet",
+      "name": "Saidapet",
+      "city": "Chennai",
+      "bbox": [
+        13.015,
+        80.216,
+        13.03,
+        80.231
+      ],
+      "center": [
+        13.0225,
+        80.2235
+      ],
+      "runoff_coeff": 0.88,
+      "design_intensity": 35,
+      "condition": 0.65,
+      "outfall_kind": "Adyar river outfall",
+      "notes": "On the Adyar river; outfalls back up when the river is in spate.",
+      "road_count": 875,
+      "drain_count": 185
+    },
+    {
+      "id": "chennai-west-tambaram",
+      "name": "West Tambaram",
+      "city": "Chennai",
+      "bbox": [
+        12.92,
+        80.086,
+        12.934,
+        80.1
+      ],
+      "center": [
+        12.927,
+        80.093
+      ],
+      "runoff_coeff": 0.8,
+      "design_intensity": 30,
+      "condition": 0.6,
+      "outfall_kind": "lake / channel outfall",
+      "notes": "Tambaram Corporation. Low-lying layouts near the Adyar headwaters.",
+      "road_count": 629,
+      "drain_count": 145
+    }
+  ]
+}
