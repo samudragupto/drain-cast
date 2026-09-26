@@ -1,0 +1,26 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "kurla_east",
+        "name": "Kurla East Ward",
+        "area_sqkm": 8.5,
+        "population": 145000
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [72.8650, 19.0650],
+            [72.8900, 19.0650],
+            [72.8900, 19.0850],
+            [72.8650, 19.0850],
+            [72.8650, 19.0650]
+          ]
+        ]
+      }
+    }
+  ]
+}

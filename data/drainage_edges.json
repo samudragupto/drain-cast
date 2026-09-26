@@ -1,0 +1,86 @@
+[
+  {
+    "from": "node_001",
+    "to": "node_002",
+    "pipe_diameter": 600,
+    "capacity": 1200,
+    "length": 250
+  },
+  {
+    "from": "node_002",
+    "to": "node_003",
+    "pipe_diameter": 750,
+    "capacity": 1500,
+    "length": 300
+  },
+  {
+    "from": "node_003",
+    "to": "node_004",
+    "pipe_diameter": 900,
+    "capacity": 2000,
+    "length": 350
+  },
+  {
+    "from": "node_004",
+    "to": "node_005",
+    "pipe_diameter": 1050,
+    "capacity": 2200,
+    "length": 280
+  },
+  {
+    "from": "node_005",
+    "to": "node_008",
+    "pipe_diameter": 1200,
+    "capacity": 3500,
+    "length": 500
+  },
+  {
+    "from": "node_006",
+    "to": "node_007",
+    "pipe_diameter": 500,
+    "capacity": 800,
+    "length": 150
+  },
+  {
+    "from": "node_007",
+    "to": "node_001",
+    "pipe_diameter": 600,
+    "capacity": 1000,
+    "length": 200
+  },
+  {
+    "from": "node_003",
+    "to": "node_005",
+    "pipe_diameter": 800,
+    "capacity": 1800,
+    "length": 400
+  },
+  {
+    "from": "node_002",
+    "to": "node_004",
+    "pipe_diameter": 700,
+    "capacity": 1400,
+    "length": 380
+  },
+  {
+    "from": "node_001",
+    "to": "node_008",
+    "pipe_diameter": 1000,
+    "capacity": 2500,
+    "length": 850
+  },
+  {
+    "from": "node_006",
+    "to": "node_002",
+    "pipe_diameter": 550,
+    "capacity": 900,
+    "length": 280
+  },
+  {
+    "from": "node_004",
+    "to": "node_008",
+    "pipe_diameter": 1100,
+    "capacity": 2800,
+    "length": 450
+  }
+]

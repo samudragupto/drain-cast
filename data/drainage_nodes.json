@@ -1,0 +1,58 @@
+[
+  {
+    "id": "node_001",
+    "type": "manhole",
+    "location": [72.8777, 19.0760],
+    "elevation": 12.5,
+    "capacity": 1500
+  },
+  {
+    "id": "node_002",
+    "type": "manhole",
+    "location": [72.8805, 19.0775],
+    "elevation": 12.8,
+    "capacity": 1800
+  },
+  {
+    "id": "node_003",
+    "type": "manhole",
+    "location": [72.8830, 19.0795],
+    "elevation": 11.5,
+    "capacity": 2000
+  },
+  {
+    "id": "node_004",
+    "type": "inlet",
+    "location": [72.8870, 19.0820],
+    "elevation": 10.2,
+    "capacity": 1600
+  },
+  {
+    "id": "node_005",
+    "type": "manhole",
+    "location": [72.8895, 19.0830],
+    "elevation": 9.8,
+    "capacity": 2200
+  },
+  {
+    "id": "node_006",
+    "type": "manhole",
+    "location": [72.8750, 19.0715],
+    "elevation": 13.2,
+    "capacity": 1400
+  },
+  {
+    "id": "node_007",
+    "type": "inlet",
+    "location": [72.8760, 19.0745],
+    "elevation": 12.1,
+    "capacity": 1200
+  },
+  {
+    "id": "node_008",
+    "type": "treatment_plant",
+    "location": [72.8920, 19.0850],
+    "elevation": 8.5,
+    "capacity": 5000
+  }
+]
